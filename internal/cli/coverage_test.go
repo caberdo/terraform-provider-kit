@@ -65,6 +65,30 @@ func TestRunCoverageMergeAcceptsOneInput(t *testing.T) {
 	}
 }
 
+func TestRunCoverageMergePreservesNonAtomicMode(t *testing.T) {
+	// A lone `set` profile is what `go test -coverprofile` produces without
+	// -race. The merged header must keep that mode, not invent `atomic`.
+	dir := t.TempDir()
+	input := writeProfileFile(t, dir, "a.out",
+		"mode: set\n"+
+			"github.com/x/y/a.go:1.1,2.2 1 1\n")
+	output := filepath.Join(dir, "union.out")
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{"coverage", "merge", "--output", output, input}, testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr.String())
+	}
+	got, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if !strings.HasPrefix(string(got), "mode: set\n") {
+		t.Errorf("merged profile =\n%s\nwant it to start with %q", got, "mode: set\n")
+	}
+}
+
 func TestRunCoverageMergeRequiresOutput(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 

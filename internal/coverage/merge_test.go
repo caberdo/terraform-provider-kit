@@ -88,18 +88,93 @@ func TestMergeSumsRepeatedBlocksWithinOneProfile(t *testing.T) {
 	}
 }
 
-func TestMergeRejectsDifferentCoverModes(t *testing.T) {
-	_, err := coverage.Merge([]coverage.Profile{
-		{Mode: "atomic"},
-		{Mode: "set"},
+func TestMergeAcceptsSingleNonAtomicProfile(t *testing.T) {
+	// Go's default -covermode is `set` when -race is absent. Comparing a lone
+	// set profile against an atomic seed rejects a perfectly valid input.
+	only := block
+	only.Count = 1
+
+	merged, err := coverage.Merge([]coverage.Profile{
+		{Mode: "set", Blocks: []coverage.Block{only}},
 	})
-	if err == nil {
-		t.Fatal("Merge() error = nil, want a mode mismatch error")
+	if err != nil {
+		t.Fatalf("Merge() error = %v, want nil", err)
 	}
-	for _, mode := range []string{"atomic", "set"} {
-		if !strings.Contains(err.Error(), mode) {
-			t.Errorf("error = %q, want it to mention %q", err, mode)
-		}
+	if got, want := merged.Mode, "set"; got != want {
+		t.Errorf("Mode = %q, want %q", got, want)
+	}
+	if len(merged.Blocks) != 1 {
+		t.Fatalf("len(Blocks) = %d, want 1", len(merged.Blocks))
+	}
+}
+
+func TestMergeSumsCountsForTwoSetProfiles(t *testing.T) {
+	unit := block
+	unit.Count = 3
+	acceptance := block
+	acceptance.Count = 4
+
+	merged, err := coverage.Merge([]coverage.Profile{
+		{Mode: "set", Blocks: []coverage.Block{unit}},
+		{Mode: "set", Blocks: []coverage.Block{acceptance}},
+	})
+	if err != nil {
+		t.Fatalf("Merge() error = %v, want nil", err)
+	}
+	if got, want := merged.Mode, "set"; got != want {
+		t.Errorf("Mode = %q, want %q", got, want)
+	}
+	if got, want := merged.Blocks[0].Count, 7; got != want {
+		t.Errorf("Count = %d, want %d", got, want)
+	}
+}
+
+func TestMergeOfSameProfileTwiceSumsCounts(t *testing.T) {
+	// Passing one profile twice is the smallest case that exercises the
+	// shared-key path against the same file, which is how the shell script's
+	// summation was compared during the parity check.
+	repeated := block
+	repeated.Count = 15
+
+	merged, err := coverage.Merge([]coverage.Profile{
+		{Mode: "atomic", Blocks: []coverage.Block{repeated}},
+		{Mode: "atomic", Blocks: []coverage.Block{repeated}},
+	})
+	if err != nil {
+		t.Fatalf("Merge() error = %v, want nil", err)
+	}
+	if len(merged.Blocks) != 1 {
+		t.Fatalf("len(Blocks) = %d, want 1", len(merged.Blocks))
+	}
+	if got, want := merged.Blocks[0].Count, 30; got != want {
+		t.Errorf("Count = %d, want %d", got, want)
+	}
+}
+
+func TestMergeRejectsDifferentCoverModes(t *testing.T) {
+	// The second mode must always be named: a mismatch reported only against
+	// the first input hides which of the later profiles disagrees.
+	for _, test := range []struct {
+		first  string
+		second string
+	}{
+		{"atomic", "set"},
+		{"count", "set"},
+	} {
+		t.Run(test.first+" and "+test.second, func(t *testing.T) {
+			_, err := coverage.Merge([]coverage.Profile{
+				{Mode: test.first},
+				{Mode: test.second},
+			})
+			if err == nil {
+				t.Fatal("Merge() error = nil, want a mode mismatch error")
+			}
+			for _, mode := range []string{test.first, test.second} {
+				if !strings.Contains(err.Error(), mode) {
+					t.Errorf("error = %q, want it to mention %q", err, mode)
+				}
+			}
+		})
 	}
 }
 

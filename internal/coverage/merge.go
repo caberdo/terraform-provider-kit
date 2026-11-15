@@ -6,14 +6,18 @@ import "fmt"
 // the same range. Every block from every profile survives; the order is
 // first-seen, and [WriteProfile] imposes the output order.
 //
-// Profiles must use the same cover mode: counts from `set` and `atomic`
+// The merged profile adopts the first input's mode, so a single `set` profile
+// merges to `set` rather than being compared against a mode no input named.
+// Profiles must then agree on that mode: counts from `set` and `atomic`
 // profiles are not comparable, so mixing them is an error rather than a guess.
 // A block whose statement count differs between profiles is also an error: the
 // shell script this replaces would silently take the last value, but the only
 // way two profiles disagree on how many statements a range spans is that they
 // came from different source revisions.
 func Merge(profiles []Profile) (Profile, error) {
-	merged := Profile{Mode: DefaultMode}
+	// An empty Mode marks "not adopted yet"; a normalised mode is never empty,
+	// because a profile without a header means [DefaultMode].
+	merged := Profile{}
 
 	type key struct {
 		file      string
@@ -29,7 +33,12 @@ func Merge(profiles []Profile) (Profile, error) {
 		if mode == "" {
 			mode = DefaultMode
 		}
-		if mode != merged.Mode {
+		switch merged.Mode {
+		case "":
+			merged.Mode = mode
+		case mode:
+			// Same mode: nothing to adopt.
+		default:
 			return Profile{}, fmt.Errorf("cannot merge coverage profiles with different cover modes: %q and %q", merged.Mode, mode)
 		}
 
@@ -48,6 +57,11 @@ func Merge(profiles []Profile) (Profile, error) {
 			index[k] = len(merged.Blocks)
 			merged.Blocks = append(merged.Blocks, block)
 		}
+	}
+
+	if merged.Mode == "" {
+		// No profiles at all: keep the documented default.
+		merged.Mode = DefaultMode
 	}
 
 	return merged, nil
