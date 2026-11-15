@@ -264,11 +264,16 @@ func buildProvider(runner Exec, stdout io.Writer, dir, provider, pluginDir, vers
 	return binary, nil
 }
 
-// writeDevConfig writes the CLI config that points both the canonical provider
-// source and Terraform's inferred default at the built binary, then returns the
-// path. Direct installation stays enabled for every other provider.
-func writeDevConfig(pluginDir, provider, binDir string) (string, error) {
-	config := fmt.Sprintf(`provider_installation {
+// devConfig renders the Terraform CLI config that points both the canonical
+// provider source and Terraform's inferred default at binDir.
+//
+// The two dev_overrides entries are emitted in a fixed order, `caberdo` first,
+// matching the printf in scripts/validate-examples.sh byte for byte. They must
+// never be rendered from a map: Go randomises map iteration, and Terraform
+// echoes the entries in the order it read them, so a map would make the
+// command's output differ between runs and from the script it replaces.
+func devConfig(provider, binDir string) string {
+	return fmt.Sprintf(`provider_installation {
   dev_overrides {
     "caberdo/%[1]s" = %[2]q
     "hashicorp/%[1]s" = %[2]q
@@ -276,9 +281,14 @@ func writeDevConfig(pluginDir, provider, binDir string) (string, error) {
   direct {}
 }
 `, provider, binDir)
+}
 
+// writeDevConfig writes the CLI config that points both the canonical provider
+// source and Terraform's inferred default at the built binary, then returns the
+// path. Direct installation stays enabled for every other provider.
+func writeDevConfig(pluginDir, provider, binDir string) (string, error) {
 	path := filepath.Join(pluginDir, "dev.tfrc")
-	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(devConfig(provider, binDir)), 0o600); err != nil {
 		return "", fmt.Errorf("%w: write %s: %w", ErrUsage, path, err)
 	}
 	return path, nil

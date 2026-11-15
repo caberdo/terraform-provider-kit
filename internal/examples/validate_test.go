@@ -395,6 +395,39 @@ func TestValidateRejectsProviderContainingAPathSeparator(t *testing.T) {
 	}
 }
 
+func TestDevConfigIsStableAndPutsCaberdoFirst(t *testing.T) {
+	// Terraform echoes the dev_overrides entries in the order it reads them and
+	// the shell script always writes caberdo first. A single render cannot
+	// detect map iteration order, so render repeatedly: every result must be
+	// byte-identical and every one must order caberdo before hashicorp.
+	const provider = "widget"
+	binDir := "/plugins/registry.terraform.io/caberdo/widget/v1.2.3/darwin_arm64"
+
+	first := devConfig(provider, binDir)
+	for range 20 {
+		if got := devConfig(provider, binDir); got != first {
+			t.Fatalf("devConfig() =\n%s\nwant the same bytes on every render:\n%s", got, first)
+		}
+	}
+
+	caberdo := strings.Index(first, `"caberdo/`+provider+`"`)
+	hashicorp := strings.Index(first, `"hashicorp/`+provider+`"`)
+	if caberdo < 0 || hashicorp < 0 {
+		t.Fatalf("devConfig() =\n%s\nwant both dev_overrides entries", first)
+	}
+	if caberdo > hashicorp {
+		t.Errorf("devConfig() =\n%s\nwant caberdo/%s before hashicorp/%s", first, provider, provider)
+	}
+}
+
+func TestDescribeVersionFallsBackToDevWithoutATag(t *testing.T) {
+	// t.TempDir() is outside any repository, so `git describe` fails and the
+	// script's `|| echo dev` fallback applies.
+	if got := describeVersion(t.TempDir()); got != "dev" {
+		t.Errorf("describeVersion() = %q, want %q", got, "dev")
+	}
+}
+
 func TestOSExecEnvironmentOverridesAmbientValues(t *testing.T) {
 	// Terraform's CLI config is exported the way the shell script exported it:
 	// a value the runner sets must shadow the ambient one, not be appended as a
