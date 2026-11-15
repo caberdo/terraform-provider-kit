@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -36,10 +37,12 @@ Run "tfkit <command> -h" for more about a command.
 const coverageUsage = `Usage:
   tfkit coverage merge --output <path> <input> [input ...]
   tfkit coverage gate [flags]
+  tfkit coverage readme [flags]
 
 Commands:
   merge   Merge cover profiles, adding the hit counts of shared blocks.
   gate    Fail when coverage is below the baseline or a package floor.
+  readme  Rewrite the README coverage block from the baseline.
 
 Run "tfkit coverage <command> -h" for more about a command.
 `
@@ -90,6 +93,8 @@ func runCoverage(args []string, stdout, stderr io.Writer) int {
 		return runCoverageMerge(args[1:], stdout, stderr)
 	case "gate":
 		return runCoverageGate(args[1:], stdout, stderr)
+	case "readme":
+		return runCoverageReadme(args[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown coverage command %q\n\n", args[0])
 		_, _ = io.WriteString(stderr, coverageUsage)
@@ -271,6 +276,107 @@ Flags:
 
 	_, _ = io.WriteString(stdout, "coverage-gate: PASS\n")
 	return exitOK
+}
+
+// runCoverageReadme implements `tfkit coverage readme`. It owns file handling
+// and the messages; rendering and checking the block belongs to the coverage
+// package. The gate command is a flag so the sentence can name `make
+// coverage-gate` once the shell script it names today is retired.
+func runCoverageReadme(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("tfkit coverage readme", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	check := flags.Bool("check", false, "report a stale README instead of rewriting it")
+	readmePath := flags.String("readme", "README.md", "path of the README to update")
+	baselinePath := flags.String("baseline", ".github/coverage-baseline.txt", "path of the statement-coverage baseline")
+	gateCommand := flags.String("gate-command", "./scripts/coverage-gate.sh", "command the emitted sentence names as the coverage gate")
+	flags.Usage = func() {
+		_, _ = io.WriteString(stderr, `usage: tfkit coverage readme [flags]
+
+Flags:
+  --check         report drift instead of rewriting; exits 1 when stale
+  --readme        path of the README to update (default "README.md")
+  --baseline      path of the statement-coverage baseline (default ".github/coverage-baseline.txt")
+  --gate-command  command the emitted sentence names as the gate
+                  (default "./scripts/coverage-gate.sh")
+`)
+	}
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitOK
+		}
+		return exitUsage
+	}
+	if flags.NArg() > 0 {
+		flags.Usage()
+		return exitUsage
+	}
+
+	doc, mode, err := readReadmeFile(*readmePath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-readme: %v\n", err)
+		return exitUsage
+	}
+	baseline, err := readBaselineFile(*baselinePath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-readme: %v\n", err)
+		return exitUsage
+	}
+
+	if *check {
+		if err := coverage.CheckReadme(doc, baseline, *gateCommand); err != nil {
+			if errors.Is(err, coverage.ErrReadmeStale) {
+				_, _ = fmt.Fprintf(stderr, "coverage-readme: '%s' is out of date with '%s'\n", *readmePath, *baselinePath)
+				_, _ = io.WriteString(stderr, "Run 'make coverage-readme' and commit the result.\n")
+				return exitFailure
+			}
+			_, _ = fmt.Fprintf(stderr, "coverage-readme: '%s': %v\n", *readmePath, err)
+			return exitUsage
+		}
+		_, _ = fmt.Fprintf(stdout, "coverage-readme: '%s' is in sync with '%s'\n", *readmePath, *baselinePath)
+		return exitOK
+	}
+
+	rendered, err := coverage.RenderReadme(doc, baseline, *gateCommand)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-readme: '%s': %v\n", *readmePath, err)
+		return exitUsage
+	}
+	// A marker or baseline problem is caught above, before anything is
+	// written; this is the ordinary "nothing to do" case.
+	if bytes.Equal(rendered, doc) {
+		_, _ = fmt.Fprintf(stdout, "coverage-readme: '%s' is already in sync with '%s'\n", *readmePath, *baselinePath)
+		return exitOK
+	}
+	if err := os.WriteFile(*readmePath, rendered, mode); err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-readme: %v\n", err)
+		return exitFailure
+	}
+
+	_, _ = fmt.Fprintf(stdout, "coverage-readme: updated '%s' from '%s'\n", *readmePath, *baselinePath)
+	return exitOK
+}
+
+// readReadmeFile reads the README at path and returns its permissions, so a
+// rewrite keeps the mode the file already had.
+func readReadmeFile(path string) ([]byte, os.FileMode, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, 0, fmt.Errorf("'%s' not found", path)
+		}
+		return nil, 0, err
+	}
+	defer func() { _ = file.Close() }()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, 0, fmt.Errorf("%s: %w", path, err)
+	}
+	doc, err := io.ReadAll(file)
+	if err != nil {
+		return nil, 0, fmt.Errorf("%s: %w", path, err)
+	}
+	return doc, info.Mode().Perm(), nil
 }
 
 // printPackageTable writes the per-package report in the shape the shell
