@@ -5,11 +5,16 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 
 	"github.com/caberdo/terraform-provider-kit/internal/coverage"
 )
@@ -30,9 +35,11 @@ Run "tfkit <command> -h" for more about a command.
 // coverageUsage is printed when `tfkit coverage` has no usable subcommand.
 const coverageUsage = `Usage:
   tfkit coverage merge --output <path> <input> [input ...]
+  tfkit coverage gate [flags]
 
 Commands:
   merge   Merge cover profiles, adding the hit counts of shared blocks.
+  gate    Fail when coverage is below the baseline or a package floor.
 
 Run "tfkit coverage <command> -h" for more about a command.
 `
@@ -81,6 +88,8 @@ func runCoverage(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "merge":
 		return runCoverageMerge(args[1:], stdout, stderr)
+	case "gate":
+		return runCoverageGate(args[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown coverage command %q\n\n", args[0])
 		_, _ = io.WriteString(stderr, coverageUsage)
@@ -163,6 +172,218 @@ func runCoverageMerge(args []string, stdout, stderr io.Writer) int {
 
 	_, _ = fmt.Fprintf(stdout, "merged %d profiles into %s\n", len(profiles), *output)
 	return exitOK
+}
+
+// runCoverageGate implements `tfkit coverage gate`. It owns file handling and
+// the human-facing report; measuring the profile and deciding whether a floor
+// is met belongs to the coverage package.
+func runCoverageGate(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("tfkit coverage gate", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	profilePath := flags.String("profile", "coverage.out", "path of the cover profile to check")
+	baselinePath := flags.String("baseline", ".github/coverage-baseline.txt", "path of the statement-coverage baseline")
+	floorsPath := flags.String("floors", ".github/coverage-floors.txt", "path of the per-package floors")
+	patterns := flags.String("packages", "./internal/...", "go list pattern for the packages to check")
+	flags.Usage = func() {
+		_, _ = io.WriteString(stderr, `usage: tfkit coverage gate [flags]
+
+Flags:
+  --profile   path of the cover profile to check (default "coverage.out")
+  --baseline  path of the statement-coverage baseline (default ".github/coverage-baseline.txt")
+  --floors    path of the per-package floors; when absent only the total is gated
+              (default ".github/coverage-floors.txt")
+  --packages  go list pattern for the packages to check (default "./internal/...")
+`)
+	}
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitOK
+		}
+		return exitUsage
+	}
+	if flags.NArg() > 0 {
+		flags.Usage()
+		return exitUsage
+	}
+
+	profile, err := readProfileFile(*profilePath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: %v\n", err)
+		return exitUsage
+	}
+	baseline, err := readBaselineFile(*baselinePath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: %v\n", err)
+		return exitUsage
+	}
+
+	// The total is checked before the floors are read, as the shell script
+	// does: a run that is already below the module floor reports that and
+	// stops, rather than surfacing a floor-file problem it would never reach.
+	total := coverage.Total(profile)
+	_, _ = fmt.Fprintf(stdout, "Total statement coverage: %.1f%% (floor %s%%)\n",
+		total, formatPercent(baseline))
+	if total < baseline {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: FAIL — %.1f%% is below the %s%% floor in %s\n",
+			total, formatPercent(baseline), *baselinePath)
+		_, _ = io.WriteString(stderr, "Add tests for what you changed, or lower the floor deliberately in the same pull request.\n")
+		return exitFailure
+	}
+
+	floors, err := readFloorsFile(*floorsPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: %v\n", err)
+		return exitUsage
+	}
+
+	var packages []string
+	if floors != nil {
+		packages, err = listGoPackages(*patterns)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "coverage-gate: go list %q: %v\n", *patterns, err)
+			return exitUsage
+		}
+		if len(packages) == 0 {
+			_, _ = fmt.Fprintf(stderr, "coverage-gate: go list %q returned no packages\n", *patterns)
+			return exitUsage
+		}
+	}
+
+	report, err := coverage.Gate(profile, baseline, floors, packages)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: %v\n", err)
+		return exitUsage
+	}
+
+	if floors != nil {
+		printPackageTable(stdout, profile, packages, floors, *floorsPath)
+	}
+
+	if len(report.Failures) > 0 {
+		_, _ = fmt.Fprintf(stderr, "\ncoverage-gate: FAIL — %d package(s) below their floor:\n", len(report.Failures))
+		for _, failure := range report.Failures {
+			_, _ = fmt.Fprintf(stderr, "  %s: %.2f%% < %s%% (delta %.2f)\n",
+				failure.Package, failure.Actual, formatPercent(failure.Floor), failure.Actual-failure.Floor)
+		}
+		_, _ = fmt.Fprintf(stderr, "Add tests for what you changed, or lower the floor deliberately in %s in the same pull request.\n", *floorsPath)
+		return exitFailure
+	}
+
+	_, _ = io.WriteString(stdout, "coverage-gate: PASS\n")
+	return exitOK
+}
+
+// printPackageTable writes the per-package report in the shape the shell
+// script prints today, so a CI log stays comparable while the script is
+// retired.
+func printPackageTable(w io.Writer, profile coverage.Profile, packages []string, floors coverage.Floors, floorsPath string) {
+	_, _ = fmt.Fprintf(w, "\nPer-package statement coverage (floors from %s):\n", floorsPath)
+	_, _ = fmt.Fprintf(w, "  %-46s %8s %8s %8s\n", "PACKAGE", "COVER", "FLOOR", "DELTA")
+
+	defaultFloor := floors[coverage.DefaultFloorKey]
+	for _, measured := range coverage.Measure(profile, packages) {
+		floor := defaultFloor
+		if explicit, ok := floors[measured.Package]; ok {
+			floor = explicit
+		}
+		_, _ = fmt.Fprintf(w, "  %-46s %7.1f%% %7s%% %+8.1f\n",
+			measured.Package, measured.Coverage, formatPercent(floor), measured.Coverage-floor)
+	}
+}
+
+// readProfileFile parses the profile at path. A missing profile is a
+// configuration error, not a failed gate.
+func readProfileFile(path string) (coverage.Profile, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return coverage.Profile{}, fmt.Errorf("profile %q not found; run 'make coverage' first", path)
+		}
+		return coverage.Profile{}, err
+	}
+	defer func() { _ = file.Close() }()
+
+	profile, err := coverage.ParseProfile(file)
+	if err != nil {
+		return coverage.Profile{}, fmt.Errorf("%s: %w", path, err)
+	}
+	return profile, nil
+}
+
+// readBaselineFile reads the bare-percentage baseline at path.
+func readBaselineFile(path string) (float64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, fmt.Errorf("baseline %q not found", path)
+		}
+		return 0, err
+	}
+	defer func() { _ = file.Close() }()
+
+	baseline, err := coverage.ReadBaseline(file)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", path, err)
+	}
+	return baseline, nil
+}
+
+// readFloorsFile reads the per-package floors at path. A missing file is not an
+// error: it means the provider gates the module total only. The nil map is
+// what tells [coverage.Gate] that.
+func readFloorsFile(path string) (coverage.Floors, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+
+	floors, err := coverage.ParseFloors(file)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return floors, nil
+}
+
+// listGoPackages runs `go list` and returns the packages matching pattern as
+// repo-relative names. `go list` prints full import paths, while profiles and
+// floors files use paths relative to the module root, so the module prefix from
+// `go list -m` is stripped. A package that is the module root itself keeps its
+// full path, as the shell script's awk does.
+//
+// It is a variable so the command tests can run without a Go module.
+var listGoPackages = func(pattern string) ([]string, error) {
+	ctx := context.Background()
+
+	moduleOutput, err := exec.CommandContext(ctx, "go", "list", "-m").Output()
+	if err != nil {
+		return nil, fmt.Errorf("go list -m: %w", err)
+	}
+	module := strings.TrimSpace(string(moduleOutput))
+	if module == "" {
+		return nil, errors.New("go list -m returned an empty module path")
+	}
+
+	output, err := exec.CommandContext(ctx, "go", "list", pattern).Output()
+	if err != nil {
+		return nil, err
+	}
+	fields := strings.Fields(string(output))
+	packages := make([]string, 0, len(fields))
+	prefix := module + "/"
+	for _, name := range fields {
+		packages = append(packages, strings.TrimPrefix(name, prefix))
+	}
+	return packages, nil
+}
+
+// formatPercent renders a percentage without trailing zeros, matching the raw
+// tokens the shell script echoes from the baseline.
+func formatPercent(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
 }
 
 // printUsage writes the usage text to w, for the same reason Run drops the
