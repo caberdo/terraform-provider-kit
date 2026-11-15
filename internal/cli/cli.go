@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/caberdo/terraform-provider-kit/internal/coverage"
+	"github.com/caberdo/terraform-provider-kit/internal/examples"
 )
 
 // usage is printed when tfkit is invoked without a subcommand.
@@ -29,6 +30,7 @@ Usage:
 Commands:
   version   Print the tfkit version.
   coverage  Work with Go coverage profiles.
+  examples  Validate the Terraform examples of a provider.
 
 Run "tfkit <command> -h" for more about a command.
 `
@@ -45,6 +47,16 @@ Commands:
   readme  Rewrite the README coverage block from the baseline.
 
 Run "tfkit coverage <command> -h" for more about a command.
+`
+
+// examplesUsage is printed when `tfkit examples` has no usable subcommand.
+const examplesUsage = `Usage:
+  tfkit examples validate --provider <name> [flags]
+
+Commands:
+  validate  Build this provider and validate every module under examples/.
+
+Run "tfkit examples <command> -h" for more about a command.
 `
 
 // Exit codes returned by Run.
@@ -73,6 +85,8 @@ func Run(args []string, version string, stdout, stderr io.Writer) int {
 		return exitOK
 	case "coverage":
 		return runCoverage(args[1:], stdout, stderr)
+	case "examples":
+		return runExamples(args[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		printUsage(stderr)
@@ -100,6 +114,89 @@ func runCoverage(args []string, stdout, stderr io.Writer) int {
 		_, _ = io.WriteString(stderr, coverageUsage)
 		return exitUsage
 	}
+}
+
+// runExamples dispatches the examples subcommands.
+func runExamples(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		_, _ = fmt.Fprintf(stderr, "examples requires a subcommand\n\n")
+		_, _ = io.WriteString(stderr, examplesUsage)
+		return exitUsage
+	}
+
+	switch args[0] {
+	case "validate":
+		return runExamplesValidate(args[1:], stdout, stderr)
+	default:
+		_, _ = fmt.Fprintf(stderr, "unknown examples command %q\n\n", args[0])
+		_, _ = io.WriteString(stderr, examplesUsage)
+		return exitUsage
+	}
+}
+
+// newExamplesRunner is the process runner `tfkit examples validate` hands to the
+// examples package. It is a variable so the command tests can run without
+// Terraform or a built provider binary.
+var newExamplesRunner = func(stdout, stderr io.Writer) examples.Exec {
+	return &examples.OSExec{Stdout: stdout, Stderr: stderr}
+}
+
+// runExamplesValidate implements `tfkit examples validate`. It only parses
+// arguments; building the provider, writing the Terraform CLI config and
+// validating the modules belong to the examples package. Exit codes match the
+// shell script it replaces: 0 on success or a skip, 1 when validation fails and
+// 2 for a usage or configuration problem.
+func runExamplesValidate(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("tfkit examples validate", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	provider := flags.String("provider", "", "provider name without the caberdo/ prefix (required)")
+	pluginDir := flags.String("plugin-dir", os.Getenv("TFKIT_PLUGIN_DIR"),
+		"directory to build the provider into (default $TFKIT_PLUGIN_DIR, else a temp directory)")
+	requireTerraform := flags.Bool("require-terraform", os.Getenv("REQUIRE_TERRAFORM") == "1",
+		"fail instead of skipping when terraform is not installed")
+	flags.Usage = func() {
+		_, _ = io.WriteString(stderr, `usage: tfkit examples validate [flags]
+
+Builds the provider from the current directory, points Terraform's dev_overrides
+at it and validates every module under examples/.
+
+Flags:
+  --provider           provider name without the caberdo/ prefix (required)
+  --plugin-dir         directory to build the provider into
+                       (default $TFKIT_PLUGIN_DIR, else a temp directory)
+  --require-terraform  fail instead of skipping when terraform is not installed
+                       (default $REQUIRE_TERRAFORM=1)
+`)
+	}
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitOK
+		}
+		return exitUsage
+	}
+	if flags.NArg() > 0 {
+		flags.Usage()
+		return exitUsage
+	}
+
+	err := examples.Validate(".", examples.Options{
+		Provider:         *provider,
+		PluginDir:        *pluginDir,
+		RequireTerraform: *requireTerraform,
+		Runner:           newExamplesRunner(stdout, stderr),
+		Stdout:           stdout,
+		Stderr:           stderr,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "examples-validate: %v\n", err)
+		if errors.Is(err, examples.ErrUsage) {
+			_, _ = io.WriteString(stderr, "\n")
+			flags.Usage()
+			return exitUsage
+		}
+		return exitFailure
+	}
+	return exitOK
 }
 
 // runCoverageMerge implements `tfkit coverage merge`. It only parses arguments
