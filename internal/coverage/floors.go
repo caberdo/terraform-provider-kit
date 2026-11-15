@@ -13,6 +13,15 @@ import (
 // an entry of its own. The floor files use the same literal key.
 const DefaultFloorKey = "default"
 
+// Floor is one configured minimum. Value is what the gate compares; Text is
+// the token exactly as it was written in the floors file, which the report
+// echoes so the output matches the shell script it replaces (for example
+// `71.0` does not become `71`).
+type Floor struct {
+	Value float64
+	Text  string
+}
+
 // Floors maps a repo-relative package name to its minimum statement coverage.
 // The [DefaultFloorKey] entry is the fallback for packages without their own
 // entry.
@@ -20,7 +29,7 @@ const DefaultFloorKey = "default"
 // A nil Floors means the provider has no floors file: only the module total is
 // gated. An empty but non-nil map is a configuration error, because a floors
 // file without `default` cannot cover a package that is not listed.
-type Floors map[string]float64
+type Floors map[string]Floor
 
 // percentagePattern is the shape the shell script accepts: a non-negative
 // decimal with an optional fractional part and no exponent or sign.
@@ -45,7 +54,8 @@ func parsePercentage(text string) (float64, error) {
 //
 // Blank lines and `#` comments are ignored, and `default` may appear at any
 // position: agentgateway's file puts it last. Every entry is validated and a
-// duplicate is an error, so a typo cannot silently disable a floor.
+// duplicate is an error, so a typo cannot silently disable a floor. Each entry
+// keeps the token as written in [Floor.Text] alongside its parsed value.
 func ParseFloors(r io.Reader) (Floors, error) {
 	floors := Floors{}
 
@@ -74,7 +84,7 @@ func ParseFloors(r io.Reader) (Floors, error) {
 		if err != nil {
 			return nil, fmt.Errorf("line %d: %w", lineNo, err)
 		}
-		floors[key] = value
+		floors[key] = Floor{Value: value, Text: fields[1]}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read floors: %w", err)

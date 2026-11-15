@@ -1,11 +1,19 @@
 package coverage_test
 
 import (
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/caberdo/terraform-provider-kit/internal/coverage"
 )
+
+// floor builds a configured floor whose value and echoed text agree, which is
+// what ParseFloors always produces.
+func floor(value float64) coverage.Floor {
+	return coverage.Floor{Value: value, Text: strconv.FormatFloat(value, 'f', -1, 64)}
+}
 
 // gateProfile builds a profile with one block per entry, all counted as
 // covered statements. Files are full import paths, as a real profile records
@@ -60,7 +68,7 @@ func TestGateFailsPackageWithoutFloorAboveDefault(t *testing.T) {
 		{File: "github.com/x/y/internal/b/b.go", NumStmt: 4, Count: 1},
 		{File: "github.com/x/y/internal/b/c.go", NumStmt: 12, Count: 0},
 	}}
-	floors := coverage.Floors{coverage.DefaultFloorKey: 70, "internal/a": 70}
+	floors := coverage.Floors{coverage.DefaultFloorKey: floor(70), "internal/a": floor(70)}
 	packages := []string{"internal/a", "internal/b"}
 
 	report, err := coverage.Gate(profile, 24, floors, packages)
@@ -85,7 +93,7 @@ func TestGateFailsPackageWithoutFloorAboveDefault(t *testing.T) {
 func TestGateFailsClosedOnFloorForUnknownPackage(t *testing.T) {
 	// A floor naming a package `go list` no longer returns is rotted
 	// configuration: it cannot silently stop applying.
-	floors := coverage.Floors{coverage.DefaultFloorKey: 70, "internal/gone": 60}
+	floors := coverage.Floors{coverage.DefaultFloorKey: floor(70), "internal/gone": floor(60)}
 
 	_, err := coverage.Gate(gateProfile(t, map[string]int{
 		"github.com/x/y/internal/a/a.go": 10,
@@ -99,7 +107,7 @@ func TestGateFailsClosedOnFloorForUnknownPackage(t *testing.T) {
 }
 
 func TestGateFailsClosedOnFloorsWithoutDefault(t *testing.T) {
-	floors := coverage.Floors{"internal/a": 70}
+	floors := coverage.Floors{"internal/a": floor(70)}
 
 	_, err := coverage.Gate(gateProfile(t, map[string]int{
 		"github.com/x/y/internal/a/a.go": 10,
@@ -130,7 +138,7 @@ func TestGateWithoutFloorsFileGatesTheTotalOnly(t *testing.T) {
 func TestGateFailsPackageWithNoTestsAtZero(t *testing.T) {
 	// internal/b exists but writes no profile records: it has no tests, and
 	// the gate must measure it at 0% rather than treating it as absent.
-	floors := coverage.Floors{coverage.DefaultFloorKey: 50}
+	floors := coverage.Floors{coverage.DefaultFloorKey: floor(50)}
 
 	report, err := coverage.Gate(gateProfile(t, map[string]int{
 		"github.com/x/y/internal/a/a.go": 10,
@@ -154,7 +162,7 @@ func TestGatePassesWhenEveryFloorIsMet(t *testing.T) {
 		{File: "github.com/x/y/internal/a/a.go", NumStmt: 10, Count: 1},
 		{File: "github.com/x/y/internal/b/b.go", NumStmt: 10, Count: 0},
 	}}
-	floors := coverage.Floors{coverage.DefaultFloorKey: 50, "internal/a": 100, "internal/b": 0}
+	floors := coverage.Floors{coverage.DefaultFloorKey: floor(50), "internal/a": floor(100), "internal/b": floor(0)}
 
 	report, err := coverage.Gate(profile, 50, floors, []string{"internal/a", "internal/b"})
 	if err != nil {
@@ -177,6 +185,43 @@ func TestGateRejectsBaselineOutsideRange(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "101") {
 		t.Errorf("error = %q, want it to name the baseline", err)
+	}
+}
+
+func TestGateRejectsInvalidFloorValues(t *testing.T) {
+	// Gate is the reuse point for the other baseline dialect, so it must not
+	// trust its caller's parser: a negative or NaN floor makes every
+	// comparison false and the gate would fail open.
+	for _, test := range []struct {
+		name  string
+		key   string
+		value float64
+	}{
+		{"negative package floor", "internal/a", -1},
+		{"package floor above 100", "internal/a", 100.5},
+		{"NaN package floor", "internal/a", math.NaN()},
+		{"NaN default floor", coverage.DefaultFloorKey, math.NaN()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			floors := coverage.Floors{
+				coverage.DefaultFloorKey: floor(70),
+				"internal/a":             floor(70),
+			}
+			floors[test.key] = coverage.Floor{Value: test.value, Text: "x"}
+
+			_, err := coverage.Gate(gateProfile(t, map[string]int{
+				"github.com/x/y/internal/a/a.go": 10,
+			}), 0, floors, []string{"internal/a"})
+			if err == nil {
+				t.Fatal("Gate() error = nil, want an invalid-floor error")
+			}
+			if !strings.Contains(err.Error(), test.key) {
+				t.Errorf("error = %q, want it to name %q", err, test.key)
+			}
+			if !strings.Contains(err.Error(), "0..100") {
+				t.Errorf("error = %q, want it to say the floor is outside 0..100", err)
+			}
+		})
 	}
 }
 

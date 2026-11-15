@@ -86,6 +86,35 @@ func TestRunCoverageGateReportsPass(t *testing.T) {
 	}
 }
 
+func TestRunCoverageGateEchoesFloorToken(t *testing.T) {
+	// The shell script echoes the floor token as written, so `71.0` must not
+	// become `71` in the table: agentgateway's CI log compares byte for byte.
+	dir := t.TempDir()
+	stubPackages(t, "internal/a")
+	profile := gateFile(t, dir, "coverage.out", gateProfile(1, 0))
+	baseline := gateFile(t, dir, "baseline.txt", "10\n")
+	floors := gateFile(t, dir, "floors.txt", "default 50.0\ninternal/a 71.0\n")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{
+		"coverage", "gate",
+		"--profile", profile,
+		"--baseline", baseline,
+		"--floors", floors,
+	}, testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "71.0%") {
+		t.Errorf("stdout =\n%s\nwant the floor echoed as 71.0%%", out)
+	}
+	if strings.Contains(out, " 71%") {
+		t.Errorf("stdout =\n%s\nwant no floor rendered as 71%%", out)
+	}
+}
+
 func TestRunCoverageGateBelowPackageFloorExitsOne(t *testing.T) {
 	dir := t.TempDir()
 	stubPackages(t, "internal/a")

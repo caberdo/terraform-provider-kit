@@ -392,8 +392,12 @@ func printPackageTable(w io.Writer, profile coverage.Profile, packages []string,
 		if explicit, ok := floors[measured.Package]; ok {
 			floor = explicit
 		}
+		text := floor.Text
+		if text == "" {
+			text = formatPercent(floor.Value)
+		}
 		_, _ = fmt.Fprintf(w, "  %-46s %7.1f%% %7s%% %+8.1f\n",
-			measured.Package, measured.Coverage, formatPercent(floor), measured.Coverage-floor)
+			measured.Package, measured.Coverage, text, measured.Coverage-floor.Value)
 	}
 }
 

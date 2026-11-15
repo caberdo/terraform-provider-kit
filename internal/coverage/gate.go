@@ -107,9 +107,9 @@ func Measure(p Profile, packages []string) []PackageCoverage {
 
 // Gate checks a profile against the module baseline and the per-package
 // floors. Coverage that is below a floor is returned in the report; a
-// configuration problem (an impossible baseline, a floors file without
-// `default`, or a floor for a package that does not exist) is an error so the
-// caller can fail closed.
+// configuration problem (an impossible baseline, a missing `default`, a floor
+// outside 0..100 or NaN, or a floor for a package that does not exist) is an
+// error so the caller can fail closed.
 //
 // A nil floors map means total-only gating; a non-nil map must contain
 // [DefaultFloorKey]. The total is checked first, as the shell script this
@@ -134,14 +134,24 @@ func Gate(p Profile, baseline float64, floors Floors, packages []string) (Report
 		return report, nil
 	}
 
-	defaultFloor, ok := floors[DefaultFloorKey]
-	if !ok {
+	if _, ok := floors[DefaultFloorKey]; !ok {
 		return Report{}, fmt.Errorf("floors: missing %q entry", DefaultFloorKey)
+	}
+
+	names := slices.Sorted(maps.Keys(floors))
+
+	// Validate here as well as in ParseFloors: Gate is the reuse point for
+	// the other baseline dialect, and a NaN or out-of-range value would make
+	// every comparison false and let the gate fail open.
+	for _, name := range names {
+		if err := validateFloor(name, floors[name]); err != nil {
+			return Report{}, err
+		}
 	}
 
 	// A floor for a package that no longer exists is rotted configuration:
 	// fail so the file stays in step with the tree.
-	for _, name := range slices.Sorted(maps.Keys(floors)) {
+	for _, name := range names {
 		if name == DefaultFloorKey {
 			continue
 		}
@@ -151,20 +161,28 @@ func Gate(p Profile, baseline float64, floors Floors, packages []string) (Report
 	}
 
 	for _, measured := range Measure(p, packages) {
-		floor := defaultFloor
+		floor := floors[DefaultFloorKey]
 		if explicit, ok := floors[measured.Package]; ok {
 			floor = explicit
 		}
-		if measured.Coverage < floor {
+		if measured.Coverage < floor.Value {
 			report.Failures = append(report.Failures, Failure{
 				Package: measured.Package,
-				Floor:   floor,
+				Floor:   floor.Value,
 				Actual:  measured.Coverage,
 			})
 		}
 	}
 
 	return report, nil
+}
+
+// validateFloor rejects a configured floor the gate cannot compare against.
+func validateFloor(name string, floor Floor) error {
+	if math.IsNaN(floor.Value) || floor.Value < 0 || floor.Value > 100 {
+		return fmt.Errorf("floor for %q is %s, which is outside 0..100", name, formatPercent(floor.Value))
+	}
+	return nil
 }
 
 // formatPercent renders a percentage without trailing zeros, matching the raw

@@ -73,11 +73,17 @@ func TestParseFloorsReadsDefaultAndPackages(t *testing.T) {
 	if got, want := len(floors), 2; got != want {
 		t.Fatalf("len(floors) = %d, want %d", got, want)
 	}
-	if got, want := floors[coverage.DefaultFloorKey], 70.0; got != want {
-		t.Errorf("floors[%q] = %v, want %v", coverage.DefaultFloorKey, got, want)
+	if got, want := floors[coverage.DefaultFloorKey].Value, 70.0; got != want {
+		t.Errorf("floors[%q].Value = %v, want %v", coverage.DefaultFloorKey, got, want)
 	}
-	if got, want := floors["internal/x"], 74.0; got != want {
-		t.Errorf("floors[%q] = %v, want %v", "internal/x", got, want)
+	if got, want := floors[coverage.DefaultFloorKey].Text, "70"; got != want {
+		t.Errorf("floors[%q].Text = %q, want %q", coverage.DefaultFloorKey, got, want)
+	}
+	if got, want := floors["internal/x"].Value, 74.0; got != want {
+		t.Errorf("floors[%q].Value = %v, want %v", "internal/x", got, want)
+	}
+	if got, want := floors["internal/x"].Text, "74"; got != want {
+		t.Errorf("floors[%q].Text = %q, want %q", "internal/x", got, want)
 	}
 }
 
@@ -95,14 +101,44 @@ func TestParseFloorsAcceptsCommentsAndDefaultAnywhere(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseFloors() error = %v, want nil", err)
 	}
-	if got, want := floors["internal/x"], 74.5; got != want {
-		t.Errorf("floors[internal/x] = %v, want %v", got, want)
+	if got, want := floors["internal/x"].Value, 74.5; got != want {
+		t.Errorf("floors[internal/x].Value = %v, want %v", got, want)
 	}
-	if got, want := floors[coverage.DefaultFloorKey], 50.0; got != want {
-		t.Errorf("floors[%q] = %v, want %v", coverage.DefaultFloorKey, got, want)
+	if got, want := floors[coverage.DefaultFloorKey].Value, 50.0; got != want {
+		t.Errorf("floors[%q].Value = %v, want %v", coverage.DefaultFloorKey, got, want)
 	}
-	if got, want := floors["internal/providerdata"], 0.0; got != want {
-		t.Errorf("floors[internal/providerdata] = %v, want %v", got, want)
+	if got, want := floors["internal/providerdata"].Value, 0.0; got != want {
+		t.Errorf("floors[internal/providerdata].Value = %v, want %v", got, want)
+	}
+}
+
+func TestParseFloorsKeepsFloorTextExactly(t *testing.T) {
+	// agentgateway writes decimal floors; the report must echo the token as
+	// written so the CI table matches the shell script byte for byte.
+	in := "internal/client 71.0\n" +
+		"internal/resources/frontendpolicy 98.0\n" +
+		"internal/providerdata 0\n" +
+		"default 80\n"
+
+	floors, err := coverage.ParseFloors(strings.NewReader(in))
+	if err != nil {
+		t.Fatalf("ParseFloors() error = %v, want nil", err)
+	}
+	for name, want := range map[string]struct {
+		value float64
+		text  string
+	}{
+		"internal/client":                   {71, "71.0"},
+		"internal/resources/frontendpolicy": {98, "98.0"},
+		"internal/providerdata":             {0, "0"},
+		coverage.DefaultFloorKey:            {80, "80"},
+	} {
+		if got := floors[name].Value; got != want.value {
+			t.Errorf("floors[%q].Value = %v, want %v", name, got, want.value)
+		}
+		if got := floors[name].Text; got != want.text {
+			t.Errorf("floors[%q].Text = %q, want %q", name, got, want.text)
+		}
 	}
 }
 
