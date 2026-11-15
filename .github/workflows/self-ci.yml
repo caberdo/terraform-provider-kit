@@ -1,0 +1,56 @@
+name: self-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      # The kit starts as a bare module, so these steps only exercise real
+      # packages once `tfkit` lands. `go build ./...` warns and succeeds on an
+      # empty module; `go vet ./...` and `go test ./...` report "no packages"
+      # and fail, which is why the gate is expected to be red until the first
+      # Go package exists.
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # Build the linter with the toolchain in go.mod instead of downloading the
+      # prebuilt binary. Released binaries are built with an older Go (v2.15.0
+      # ships go1.27.0), which cannot read Go 1.27.4 export data: the lint run
+      # fails with "export data version 5 is greater than maximum supported
+      # version 4". goinstall mode compiles v2.15.0 with the same Go as the
+      # module, so the two stay in step.
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+          install-mode: goinstall
+          args: --config .golangci.yml
+
+      - name: Test
+        run: go test ./...

@@ -1,0 +1,15 @@
+# Binaries
+bin/
+dist/
+
+# Output of go coverage
+*.out
+
+# Terraform
+.terraform/
+
+# Agent scratch space (plan ledgers, briefs, review packages)
+.superpowers/
+
+# Worktrees created for isolated tasks
+.worktrees/
