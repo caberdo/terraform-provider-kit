@@ -122,6 +122,56 @@ func TestValidateContextsRejectsConditionalJobs(t *testing.T) {
 	}
 }
 
+func TestValidateContextsRejectsRollUpLaunderedThroughACaller(t *testing.T) {
+	// The called workflow's Report job is a roll-up on its own, but it runs
+	// under a caller whose condition is compounded, so the composed context is
+	// not stable. Clearing Condition and HasNeeds is what keeps it rejected.
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "called.yml"), `on: workflow_call
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+  report:
+    name: Report
+    needs: [build]
+    if: always()
+    runs-on: ubuntu-latest
+`)
+	caller := filepath.Join(dir, "caller.yml")
+	writeFile(t, caller, `on: pull_request
+jobs:
+  ci:
+    if: always() && github.ref == 'refs/heads/main'
+    uses: ./called.yml
+`)
+
+	jobs, err := Jobs(caller)
+	if err != nil {
+		t.Fatalf("Jobs: %v", err)
+	}
+
+	composed, ok := findJob(jobs, "ci / Report")
+	if !ok {
+		t.Fatalf("jobs = %+v, want a composed ci / Report job", jobs)
+	}
+	if !composed.HasIf {
+		t.Errorf("HasIf = false, want the caller's condition propagated")
+	}
+	if composed.HasNeeds {
+		t.Errorf("HasNeeds = true, want it cleared under a conditional caller")
+	}
+	if composed.Condition != "" {
+		t.Errorf("Condition = %q, want it cleared under a conditional caller", composed.Condition)
+	}
+
+	err = ValidateContexts(jobs, []string{"ci / Report"})
+	if err == nil || !strings.Contains(err.Error(), "if:") {
+		t.Fatalf("ValidateContexts = %v, want an if: error for the composed context", err)
+	}
+}
+
 // workflowWithCondition writes a workflow whose "Roll Up" job carries if: with
 // the given condition, and optionally needs: and a strategy matrix.
 func workflowWithCondition(t *testing.T, condition string, needs, matrix bool) []Job {

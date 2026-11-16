@@ -28,8 +28,9 @@ type Job struct {
 	HasIf bool
 	// Condition is the raw if: expression, empty when the job has none.
 	Condition string
-	// HasNeeds reports whether the job declares needs:, so an always() roll-up
-	// has something to summarise.
+	// HasNeeds reports whether the job declares needs:. It is cleared when the
+	// job is composed under a conditional caller, so a caller's condition cannot
+	// promote a delegated check to an always() roll-up.
 	HasNeeds bool
 	// HasMatrix reports whether the job fans out over a strategy matrix, which
 	// makes its check name unstable across runs.
@@ -409,7 +410,9 @@ func isAlwaysRollUp(job Job) bool {
 // qualify.
 func isBareAlways(condition string) bool {
 	expression := strings.TrimSpace(condition)
-	expression = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(expression, "${{"), "}}"))
+	if inner, ok := strings.CutPrefix(expression, "${{"); ok {
+		expression = strings.TrimSpace(strings.TrimSuffix(inner, "}}"))
+	}
 	return strings.EqualFold(expression, "always()")
 }
 
