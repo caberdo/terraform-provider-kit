@@ -566,6 +566,11 @@ jobs:
           path: ${{ inputs.unit-profile }}
           if-no-files-found: ignore
 
+  # Do not wire a provider whose `.github/coverage-baseline.txt` uses the
+  # `measured_*`/`floor_*` dialect (gravitino, rustfs) until Task 14 lands its
+  # dialect support in `tfkit coverage gate`/`coverage readme`: the command reads
+  # the bare-percentage dialect only and exits 2 on those files. Wiring them
+  # early turns this job red for a tooling gap, not for a coverage regression.
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
@@ -640,6 +645,11 @@ jobs:
           --floors ${{ inputs.coverage-floors }}
           --packages ${{ inputs.packages }}
 
+  # The job is deliberately unconditional: openmetadata's ruleset requires a
+  # context literally named `Docs`, and a skipped required check counts as a
+  # pass. A disabled or inapplicable docs check therefore reports success from a
+  # job that actually ran, and a mode it does not understand fails instead of
+  # doing nothing.
   docs:
     name: ${{ inputs.docs-job-name }}
     runs-on: ubuntu-latest
@@ -651,15 +661,37 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    if: inputs.docs && (inputs.docs-mode == 'drift' || (inputs.docs-mode == 'autopr' && github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    env:
+      DOCS_ENABLED: ${{ inputs.docs && (inputs.docs-mode == 'drift' || (inputs.docs-mode == 'autopr' && github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     steps:
+      - name: Fail on an unrecognised docs mode
+        if: inputs.docs && inputs.docs-mode != 'none' && inputs.docs-mode != 'drift' && inputs.docs-mode != 'autopr'
+        run: |
+          echo "docs-mode '${{ inputs.docs-mode }}' is not one of none, drift or autopr." >&2
+          exit 1
+
+      - name: Explain why the docs check did not run
+        if: env.DOCS_ENABLED != 'true'
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.docs }}" != "true" ]]; then
+            reason="docs: false"
+          elif [[ "${{ inputs.docs-mode }}" == "none" ]]; then
+            reason="docs-mode: none, the drift check runs in the Test job"
+          else
+            reason="docs-mode: autopr only opens a pull request on a push to main"
+          fi
+          echo "Documentation checks are disabled for this run ($reason)." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout
+        if: env.DOCS_ENABLED == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.ref }}
           fetch-depth: 1
 
       - name: Set up Go
+        if: env.DOCS_ENABLED == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: "go.mod"
@@ -667,16 +699,18 @@ jobs:
 
       # tfplugindocs reads the provider schema through terraform.
       - name: Set up Terraform
+        if: env.DOCS_ENABLED == 'true'
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ inputs.terraform-version }}
           terraform_wrapper: false
 
       - name: Generate docs
+        if: env.DOCS_ENABLED == 'true'
         run: go generate ./...
 
       - name: Check generated docs are committed
-        if: inputs.docs-mode == 'drift'
+        if: env.DOCS_ENABLED == 'true' && inputs.docs-mode == 'drift'
         run: |
           set -euo pipefail
           git diff --exit-code -- docs/
@@ -686,7 +720,7 @@ jobs:
           fi
 
       - name: Open PR with updated docs
-        if: inputs.docs-mode == 'autopr'
+        if: env.DOCS_ENABLED == 'true' && inputs.docs-mode == 'autopr'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
