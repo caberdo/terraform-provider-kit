@@ -19,7 +19,7 @@ are in [`GOVERNANCE.md`](GOVERNANCE.md).
 ### First time setup
 
 ```bash
-git clone https://{{MODULE}}.git
+git clone https://github.com/{{REPO}}.git
 cd terraform-provider-{{PROVIDER}}
 go mod download
 make test          # unit tests; the TestAcc* suite skips itself without TF_ACC
@@ -212,4 +212,4 @@ both are genuinely useful here.
 ## License
 
 By contributing, you agree that your contributions will be licensed under the
-[MIT License](LICENSE).
+[{{LICENSE}} License](LICENSE).

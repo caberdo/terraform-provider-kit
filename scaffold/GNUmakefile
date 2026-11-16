@@ -8,7 +8,20 @@ VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 # scaffold check. Keep this pin equal to the `uses:` refs in
 # .github/workflows/*.yml: one version for the local targets and the reusable
 # workflows, so they cannot drift apart.
-TFKIT ?= go run github.com/caberdo/terraform-provider-kit/cmd/tfkit@{{KIT_VERSION}}
+#
+# Install the pinned kit once and call the binary. `go run` rewrites a child's
+# non-zero status to 1, which would hide the difference between drift (1) and a
+# configuration problem (2) that `make scaffold-check` and the coverage commands
+# document. Override TFKIT to use a binary you installed yourself.
+TFKIT_PACKAGE = github.com/caberdo/terraform-provider-kit/cmd/tfkit@{{KIT_VERSION}}
+ifeq ($(origin TFKIT), undefined)
+TFKIT := $(CURDIR)/bin/tfkit
+TFKIT_DEP := $(TFKIT)
+endif
+
+$(CURDIR)/bin/tfkit:
+	@mkdir -p $(dir $@)
+	GOBIN=$(dir $@) go install $(TFKIT_PACKAGE)
 
 build:
 	go build -o bin/$(BINARY_NAME) -ldflags "-X main.version=$(VERSION)" .
@@ -28,7 +41,7 @@ coverage-html: coverage
 
 # Unit coverage (coverage.out) plus the acceptance profile written by the
 # acceptance container (coverage-acceptance.out) as one number.
-coverage-merge:
+coverage-merge: $(TFKIT_DEP)
 	$(TFKIT) coverage merge --output coverage-union.out coverage.out coverage-acceptance.out
 	@echo
 	@go tool cover -func=coverage-union.out
@@ -36,14 +49,14 @@ coverage-merge:
 # Regenerate the coverage badge and floor statement in README.md from
 # .github/coverage-baseline.txt; `make coverage-readme-check` fails when the
 # committed README has drifted from the baseline.
-coverage-readme:
+coverage-readme: $(TFKIT_DEP)
 	$(TFKIT) coverage readme
 
-coverage-readme-check:
+coverage-readme-check: $(TFKIT_DEP)
 	$(TFKIT) coverage readme --check
 
 # Fail when the merged profile is below the floor in .github/coverage-baseline.txt.
-coverage-gate:
+coverage-gate: $(TFKIT_DEP)
 	$(TFKIT) coverage gate --profile coverage-union.out
 
 testacc:
@@ -72,7 +85,7 @@ install: build
 # tfkit builds into a temporary directory; set TFKIT_PLUGIN_DIR (or pass
 # --plugin-dir) to pin that directory, so parallel runs do not overwrite each
 # other's build.
-validate-examples:
+validate-examples: $(TFKIT_DEP)
 	$(TFKIT) examples validate --provider {{PROVIDER}}
 
 generate:
@@ -81,19 +94,22 @@ generate:
 # Fail when the release metadata a release pull request carries is inconsistent.
 # The tag workflow enforces the same agreement on main; this keeps the failure
 # in the pull request instead of after the merge.
-release-check:
+release-check: $(TFKIT_DEP)
 	$(TFKIT) release check
 
 # Fail when a file the kit owns has drifted from the canonical scaffold. The
 # provider, module and versions-file are derived from the repository; the
 # product-facing facts are named here. `--allow <path>:<reason>` records a
 # deliberate deviation instead of hiding it.
-scaffold-check:
+scaffold-check: $(TFKIT_DEP)
 	$(TFKIT) scaffold check \
 		--product {{PRODUCT}} \
 		--year {{YEAR}} \
 		--copyright "{{COPYRIGHT}}" \
 		--kit-version {{KIT_VERSION}} \
-		--upstream {{UPSTREAM_URL}}
+		--packages {{PACKAGES}} \
+		--upstream {{UPSTREAM_URL}} \
+		--repo {{REPO}} \
+		--license {{LICENSE}}
 
 .PHONY: default build test coverage coverage-html coverage-merge coverage-readme coverage-readme-check coverage-gate testacc testacc-docker lint lint-fix fmt vet install validate-examples generate release-check scaffold-check

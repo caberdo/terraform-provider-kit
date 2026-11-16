@@ -3,16 +3,16 @@
 ## Documentation
 
 - [Provider documentation](https://registry.terraform.io/providers/{{REGISTRY_NAMESPACE}}/{{PROVIDER}}/latest/docs)
-- [README](https://{{MODULE}}#readme) — quick start, compatibility, testing and troubleshooting
+- [README](https://github.com/{{REPO}}#readme) — quick start, compatibility, testing and troubleshooting
 - [Architecture](ARCHITECTURE.md) — how the provider is put together
 - [Roadmap](ROADMAP.md) — what is planned, and what is explicitly out of scope
 - [Governance](GOVERNANCE.md) — who decides what, and how
 - [{{PRODUCT}} API documentation](https://github.com/{{UPSTREAM_URL}})
-- [Resource examples](https://{{MODULE}}/tree/main/examples)
+- [Resource examples](https://github.com/{{REPO}}/tree/main/examples)
 
 ## Getting help
 
-- [GitHub Issues](https://{{MODULE}}/issues) — bug reports, feature requests and questions. Bug
+- [GitHub Issues](https://github.com/{{REPO}}/issues) — bug reports, feature requests and questions. Bug
   reports and feature requests have templates; GitHub Discussions is disabled on this repository,
   so questions are answered in issues.
 - [Contributing](CONTRIBUTING.md) — development setup, tests and the pull request process.

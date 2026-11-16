@@ -1,0 +1,8 @@
+# Statement-coverage floor for the module total.
+#
+# `make coverage-gate` (tfkit) fails a run below this percentage. This is the
+# organisation's starting floor for a provider scaffolded from the kit: raise it
+# as tests land. After changing it, run `make coverage-readme` so README.md
+# states the same number; the `coverage-readme-in-test` check fails when the two
+# disagree.
+80

@@ -2,7 +2,9 @@ package cli_test
 
 import (
 	"bytes"
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,6 +24,7 @@ func scaffoldFixtureValues() map[string]string {
 		"PROVIDER":           "trino",
 		"PRODUCT":            "Trino",
 		"MODULE":             "github.com/caberdo/terraform-provider-trino",
+		"REPO":               "caberdo/terraform-provider-trino",
 		"REGISTRY_NAMESPACE": "caberdo",
 		"YEAR":               "2026",
 		"COPYRIGHT":          "Dennis de Jong",
@@ -31,20 +34,44 @@ func scaffoldFixtureValues() map[string]string {
 		"UPSTREAM_URL":       "trinodb/trino",
 		"VERSION_ENV":        "TRINO_VERSION",
 		"EXPECT_VERSION_ENV": "TRINO_EXPECT_VERSION",
+		"LICENSE":            "MIT",
 	}
 }
 
-// alignedScaffoldRepo writes the rendered scaffold into a directory named
-// terraform-provider-trino, with a go.mod the CLI can read.
-func alignedScaffoldRepo(t *testing.T) string {
+// scaffoldRustfsValues are the values a rustfs repository supplies. Its
+// Makefile tests ./..., so the package pattern must be derived rather than
+// assumed, and its licence is the documented Apache-2.0 exemption.
+func scaffoldRustfsValues() map[string]string {
+	return map[string]string{
+		"PROVIDER":           "rustfs",
+		"PRODUCT":            "RustFS",
+		"MODULE":             "github.com/caberdo/terraform-provider-rustfs",
+		"REPO":               "caberdo/terraform-provider-rustfs",
+		"REGISTRY_NAMESPACE": "caberdo",
+		"YEAR":               "2026",
+		"COPYRIGHT":          "Dennis de Jong",
+		"KIT_VERSION":        scaffoldKitVersion,
+		"PACKAGES":           "./...",
+		"VERSIONS_FILE":      ".github/rustfs-versions.txt",
+		"UPSTREAM_URL":       "rustfs/rustfs",
+		"VERSION_ENV":        "RUSTFS_VERSION",
+		"EXPECT_VERSION_ENV": "RUSTFS_EXPECT_VERSION",
+		"LICENSE":            "Apache-2.0",
+	}
+}
+
+// alignedRepo writes a rendered tree into a directory with the given name,
+// writes its go.mod and gives it an origin remote, so the CLI can derive the
+// provider, module, package pattern and repository.
+func alignedRepo(t *testing.T, dirName string, values map[string]string) string {
 	t.Helper()
 
-	dir := filepath.Join(t.TempDir(), "terraform-provider-trino")
+	dir := filepath.Join(t.TempDir(), dirName)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir repo: %v", err)
 	}
 
-	rendered, err := scaffold.Render(filepath.Join("..", "..", "scaffold"), scaffoldFixtureValues())
+	rendered, err := scaffold.Render(filepath.Join("..", "..", "scaffold"), values)
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
@@ -58,23 +85,56 @@ func alignedScaffoldRepo(t *testing.T) string {
 		}
 	}
 
-	goMod := "module github.com/caberdo/terraform-provider-trino\n\ngo 1.27.4\n"
+	goMod := "module " + values["MODULE"] + "\n\ngo 1.27.4\n"
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0o644); err != nil {
 		t.Fatalf("write go.mod: %v", err)
 	}
+
+	runGit(t, dir, "init", "-q")
+	runGit(t, dir, "remote", "add", "origin", "https://github.com/"+values["REPO"]+".git")
 	return dir
 }
 
-// scaffoldCheckArgs are the flags the fixture needs; provider, module,
-// packages and versions-file are left to the derivation.
+// alignedScaffoldRepo is a trino-shaped repository.
+func alignedScaffoldRepo(t *testing.T) string {
+	t.Helper()
+	return alignedRepo(t, "terraform-provider-trino", scaffoldFixtureValues())
+}
+
+// alignedRustfsRepo is a rustfs-shaped repository: ./... package pattern and
+// the Apache-2.0 licence exemption.
+func alignedRustfsRepo(t *testing.T) string {
+	t.Helper()
+	return alignedRepo(t, "terraform-provider-rustfs", scaffoldRustfsValues())
+}
+
+// runGit runs one git command in dir and fails the test when it fails.
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+
+	command := exec.CommandContext(context.Background(),
+		"git", append([]string{"-C", dir}, args...)...)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v (%s)", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+}
+
+// scaffoldCheckArgs are the flags the trino fixture needs; provider, module,
+// packages, versions-file and repo are left to the derivation.
 func scaffoldCheckArgs(extra ...string) []string {
+	return scaffoldCheckArgsFor("Trino", "trinodb/trino", extra...)
+}
+
+// scaffoldCheckArgsFor builds the flags for a provider whose product and
+// upstream differ from trino's.
+func scaffoldCheckArgsFor(product, upstream string, extra ...string) []string {
 	args := []string{
 		"scaffold", "check",
-		"--product", "Trino",
+		"--product", product,
 		"--year", "2026",
 		"--copyright", "Dennis de Jong",
 		"--kit-version", scaffoldKitVersion,
-		"--upstream", "trinodb/trino",
+		"--upstream", upstream,
 	}
 	return append(args, extra...)
 }
@@ -307,6 +367,121 @@ func TestRunScaffoldCheckRejectsAProductWithoutAProvider(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "provider") {
 		t.Errorf("stderr = %q, want it to name the provider", stderr.String())
+	}
+}
+
+func TestRunScaffoldCheckDerivesTheRepositoryFromAnSSHRemote(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+	runGit(t, dir, "remote", "set-url", "origin",
+		"git@github.com:caberdo/terraform-provider-trino.git")
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(scaffoldCheckArgs(), testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr.String())
+	}
+}
+
+func TestRunScaffoldCheckRequiresRepoWithoutAnOrigin(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+	runGit(t, dir, "remote", "remove", "origin")
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(scaffoldCheckArgs(), testVersion, &stdout, &stderr)
+
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "--repo") {
+		t.Errorf("stderr = %q, want it to name --repo", stderr.String())
+	}
+}
+
+func TestRunScaffoldCheckRejectsAnUnparsableRemote(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+	runGit(t, dir, "remote", "set-url", "origin", "/tmp/not-a-github-repository")
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(scaffoldCheckArgs(), testVersion, &stdout, &stderr)
+
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "--repo") {
+		t.Errorf("stderr = %q, want it to name --repo", stderr.String())
+	}
+}
+
+func TestRunScaffoldCheckEchoesAnUnusedAllowance(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(scaffoldCheckArgs("--allow", ".editorconfig:kept in reserve"),
+		testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "unused") {
+		t.Errorf("stdout = %q, want the unused allowance echoed", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "14 files match the scaffold") {
+		t.Errorf("stdout = %q, want the true matched count", stdout.String())
+	}
+}
+
+func TestRunScaffoldCheckDerivesThePackagePattern(t *testing.T) {
+	dir := alignedRustfsRepo(t)
+	t.Chdir(dir)
+
+	var stdout, stderr bytes.Buffer
+	args := scaffoldCheckArgsFor("RustFS", "rustfs/rustfs", "--license", "Apache-2.0")
+	code := cli.Run(args, testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; ./... must be derived from GNUmakefile (stderr = %q)",
+			code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "14 files match the scaffold") {
+		t.Errorf("stdout = %q, want the match count", stdout.String())
+	}
+}
+
+func TestRenderedScaffoldCoverageReadmeIsInSync(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{
+		"coverage", "readme", "--check",
+		"--readme", "README.md",
+		"--baseline", ".github/coverage-baseline.txt",
+	}, testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; rendered README and baseline must agree (stderr = %q)",
+			code, stderr.String())
+	}
+}
+
+func TestRunScaffoldCheckRejectsAnInvalidLicense(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(scaffoldCheckArgs("--license", "MIT OR Apache-2.0"),
+		testVersion, &stdout, &stderr)
+
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "--license") {
+		t.Errorf("stderr = %q, want it to name --license", stderr.String())
 	}
 }
 

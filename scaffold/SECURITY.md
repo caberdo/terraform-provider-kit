@@ -6,7 +6,7 @@ check each one against the source.
 
 Module: `{{MODULE}}`
 Registry: `registry.terraform.io/{{REGISTRY_NAMESPACE}}/{{PROVIDER}}`
-License: MIT. Repository: <https://{{MODULE}}>
+License: {{LICENSE}}. Repository: <https://github.com/{{REPO}}>
 
 ## Supported versions
 
@@ -25,7 +25,7 @@ older tag should upgrade before reporting a defect that already has a fix on `ma
 
 Report privately through GitHub private vulnerability reporting:
 
-<https://{{MODULE}}/security/advisories/new>
+<https://github.com/{{REPO}}/security/advisories/new>
 
 Do not open a public issue for a suspected vulnerability. GitHub Discussions are disabled on this
 repository; the private advisory form above is the reporting channel.

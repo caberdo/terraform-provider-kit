@@ -1,7 +1,7 @@
 # Roadmap
 
 What this project intends to do — and deliberately not do — over the next twelve months. The
-living version of the near-term work is the [issue list](https://{{MODULE}}/issues); this file
+living version of the near-term work is the [issue list](https://github.com/{{REPO}}/issues); this file
 records the direction those issues add up to. It is reviewed once per release; `CHANGELOG.md`
 records what actually shipped.
 

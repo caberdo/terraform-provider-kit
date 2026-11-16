@@ -62,12 +62,34 @@ var enforced = []string{
 // not a silent literal in the output.
 var placeholderPattern = regexp.MustCompile(`\{\{([A-Za-z0-9_]+)\}\}`)
 
+// knownPlaceholders is the complete set a template may use. An unknown name is
+// a configuration error even when a value for it was supplied: a typo in the
+// template must not become a literal in a generated repository.
+var knownPlaceholders = map[string]struct{}{
+	"PROVIDER":           {},
+	"PRODUCT":            {},
+	"MODULE":             {},
+	"REPO":               {},
+	"REGISTRY_NAMESPACE": {},
+	"YEAR":               {},
+	"COPYRIGHT":          {},
+	"KIT_VERSION":        {},
+	"PACKAGES":           {},
+	"VERSIONS_FILE":      {},
+	"UPSTREAM_URL":       {},
+	"VERSION_ENV":        {},
+	"EXPECT_VERSION_ENV": {},
+	"LICENSE":            {},
+}
+
 // Allowance records a deliberate deviation: a path the check skips and the
 // reason it skips it. The reason is required, so the deviation is recorded
-// rather than silent.
+// rather than silent. Used is set by Check in Report.Allowed and ignored in
+// Options.Allow.
 type Allowance struct {
 	Path   string
 	Reason string
+	Used   bool
 }
 
 // Options configures Check.
@@ -104,9 +126,14 @@ type Problem struct {
 type Report struct {
 	// Checked lists every path the check compared, in canonical order.
 	Checked []string
+	// Matched is the number of checked files whose content equals the
+	// scaffold. An allowed deviation is not a match.
+	Matched int
 	// Problems lists the deviations that are not allowed, in canonical order.
 	Problems []Problem
-	// Allowed lists the allowances that suppressed a deviation.
+	// Allowed lists every exemption in checked-file order. Used reports
+	// whether it suppressed a deviation, so an unused exemption is visible
+	// rather than silently dropped.
 	Allowed []Allowance
 }
 
@@ -147,6 +174,16 @@ func renderFS(fsys fs.FS, values map[string]string) (map[string][]byte, error) {
 		if err != nil {
 			return fmt.Errorf("%s: %w", p, err)
 		}
+		// A malformed token such as {{PRODUCT-NAME}}, {{ PRODUCT }} or {{}}
+		// survives substitution because it is not a NAME-shaped placeholder.
+		// Rendering it would write the token into the repository, so it is a
+		// configuration error like a missing value.
+		if leftover, ok := leftoverPlaceholder(name); ok {
+			return fmt.Errorf("%s: unrendered placeholder %q in the file name", p, leftover)
+		}
+		if leftover, ok := leftoverPlaceholder(body); ok {
+			return fmt.Errorf("%s: unrendered placeholder %q", p, leftover)
+		}
 		rendered[name] = []byte(body)
 		return nil
 	})
@@ -156,33 +193,98 @@ func renderFS(fsys fs.FS, values map[string]string) (map[string][]byte, error) {
 	return rendered, nil
 }
 
-// substitute replaces every placeholder in text, or reports every name without
-// a value in one error so a first run names all of them.
+// substitute replaces every known placeholder in text. An unknown name and a
+// known name without a value are collected separately, so one run names every
+// problem instead of stopping at the first. A `${{ … }}` expression is Go
+// template syntax in a workflow, not a scaffold placeholder, and is copied
+// through untouched.
 func substitute(text string, values map[string]string) (string, error) {
 	missing := make(map[string]struct{})
-	rendered := placeholderPattern.ReplaceAllStringFunc(text, func(match string) string {
-		name := match[2 : len(match)-2]
-		value, ok := values[name]
-		if !ok || value == "" {
-			missing[name] = struct{}{}
-			return match
-		}
-		return value
-	})
-	if len(missing) == 0 {
-		return rendered, nil
-	}
+	unknown := make(map[string]struct{})
 
-	names := make([]string, 0, len(missing))
-	for name := range missing {
-		names = append(names, name)
+	var rendered strings.Builder
+	last := 0
+	for _, match := range placeholderPattern.FindAllStringSubmatchIndex(text, -1) {
+		start, end := match[0], match[1]
+		if isTemplateExpression(text, start) {
+			continue
+		}
+		name := text[match[2]:match[3]]
+		value, hasValue := values[name]
+
+		rendered.WriteString(text[last:start])
+		switch {
+		case !isKnown(name):
+			unknown[name] = struct{}{}
+			rendered.WriteString(text[start:end])
+		case !hasValue || value == "":
+			missing[name] = struct{}{}
+			rendered.WriteString(text[start:end])
+		default:
+			rendered.WriteString(value)
+		}
+		last = end
 	}
-	sort.Strings(names)
-	quoted := make([]string, 0, len(names))
-	for _, name := range names {
+	rendered.WriteString(text[last:])
+
+	if len(unknown) > 0 {
+		return "", fmt.Errorf("unknown placeholder %s", quotedNames(unknown))
+	}
+	if len(missing) > 0 {
+		return "", fmt.Errorf("no value for placeholder %s", quotedNames(missing))
+	}
+	return rendered.String(), nil
+}
+
+// isTemplateExpression reports whether the "{{" at start is the body of a
+// GitHub Actions `${{ … }}` expression.
+func isTemplateExpression(text string, start int) bool {
+	return start > 0 && text[start-1] == '$'
+}
+
+// isKnown reports whether name is in the scaffold's placeholder set.
+func isKnown(name string) bool {
+	_, ok := knownPlaceholders[name]
+	return ok
+}
+
+// quotedNames renders a set of names as sorted, quoted, comma-separated text.
+func quotedNames(names map[string]struct{}) string {
+	sorted := make([]string, 0, len(names))
+	for name := range names {
+		sorted = append(sorted, name)
+	}
+	sort.Strings(sorted)
+	quoted := make([]string, 0, len(sorted))
+	for _, name := range sorted {
 		quoted = append(quoted, fmt.Sprintf("%q", name))
 	}
-	return "", fmt.Errorf("no value for placeholder %s", strings.Join(quoted, ", "))
+	return strings.Join(quoted, ", ")
+}
+
+// leftoverPlaceholder returns the first `{{…}}` that is not a GitHub Actions
+// `${{ … }}` expression, so a malformed or unclosed token cannot be written
+// into a generated repository.
+func leftoverPlaceholder(text string) (string, bool) {
+	for i := 0; i+1 < len(text); i++ {
+		if text[i] != '{' || text[i+1] != '{' || isTemplateExpression(text, i) {
+			continue
+		}
+		if end := strings.Index(text[i:], "}}"); end >= 0 {
+			return text[i : i+end+2], true
+		}
+		// Unclosed: report the token to the end of the line, or the last 40
+		// bytes when the line is longer, so the error stays readable.
+		end := strings.IndexByte(text[i:], '\n')
+		if end < 0 {
+			end = len(text) - i
+		}
+		if end > 40 {
+			end = 40
+		}
+		return text[i : i+end], true
+	}
+	return "", false
 }
 
 // Check compares root against the scaffold embedded in tfkit.
@@ -207,16 +309,25 @@ func Check(root string, values map[string]string, opts Options) (Report, error) 
 	}
 
 	report := Report{Checked: checked}
+	allowedIndex := make(map[string]int, len(allow))
+	for _, rel := range checked {
+		if allowance, ok := allow[rel]; ok {
+			allowedIndex[rel] = len(report.Allowed)
+			report.Allowed = append(report.Allowed, allowance)
+		}
+	}
+
 	for _, rel := range checked {
 		problem, err := compare(root, rel, rendered[rel])
 		if err != nil {
 			return Report{}, err
 		}
 		if problem == nil {
+			report.Matched++
 			continue
 		}
-		if allowance, ok := allow[rel]; ok {
-			report.Allowed = append(report.Allowed, allowance)
+		if index, ok := allowedIndex[rel]; ok {
+			report.Allowed[index].Used = true
 			continue
 		}
 		report.Problems = append(report.Problems, *problem)

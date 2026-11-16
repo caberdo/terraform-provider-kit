@@ -1,6 +1,7 @@
 package scaffold_test
 
 import (
+	"bytes"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/caberdo/terraform-provider-kit/internal/coverage"
 	"github.com/caberdo/terraform-provider-kit/internal/scaffold"
 	assets "github.com/caberdo/terraform-provider-kit/scaffold"
 )
@@ -29,6 +31,7 @@ func trinoValues() map[string]string {
 		"PROVIDER":           "trino",
 		"PRODUCT":            "Trino",
 		"MODULE":             "github.com/caberdo/terraform-provider-trino",
+		"REPO":               "caberdo/terraform-provider-trino",
 		"REGISTRY_NAMESPACE": "caberdo",
 		"YEAR":               "2026",
 		"COPYRIGHT":          "Dennis de Jong",
@@ -38,6 +41,7 @@ func trinoValues() map[string]string {
 		"UPSTREAM_URL":       "trinodb/trino",
 		"VERSION_ENV":        "TRINO_VERSION",
 		"EXPECT_VERSION_ENV": "TRINO_EXPECT_VERSION",
+		"LICENSE":            "MIT",
 	}
 }
 
@@ -47,6 +51,7 @@ func rustfsValues() map[string]string {
 		"PROVIDER":           "rustfs",
 		"PRODUCT":            "RustFS",
 		"MODULE":             "github.com/caberdo/terraform-provider-rustfs",
+		"REPO":               "caberdo/terraform-provider-rustfs",
 		"REGISTRY_NAMESPACE": "caberdo",
 		"YEAR":               "2026",
 		"COPYRIGHT":          "Dennis de Jong",
@@ -56,6 +61,7 @@ func rustfsValues() map[string]string {
 		"UPSTREAM_URL":       "rustfs/rustfs",
 		"VERSION_ENV":        "RUSTFS_VERSION",
 		"EXPECT_VERSION_ENV": "RUSTFS_EXPECT_VERSION",
+		"LICENSE":            "Apache-2.0",
 	}
 }
 
@@ -302,6 +308,32 @@ func TestAllowSuppressesExactlyThatFile(t *testing.T) {
 	if report.Allowed[0].Path != ".editorconfig" || report.Allowed[0].Reason != reason {
 		t.Errorf("Allowed = %+v, want the editorconfig allowance with its reason", report.Allowed[0])
 	}
+	if !report.Allowed[0].Used {
+		t.Error("Allowed[0].Used = false, want true for an allowance that suppressed a deviation")
+	}
+}
+
+func TestCheckReportsAnUnusedAllowance(t *testing.T) {
+	dir := aligned(t, "trino", trinoValues())
+
+	report, err := scaffold.Check(dir, trinoValues(), scaffold.Options{
+		Allow: []scaffold.Allowance{{Path: ".editorconfig", Reason: "kept in reserve"}},
+	})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !report.OK() {
+		t.Fatalf("Problems = %v, want none", report.Problems)
+	}
+	if report.Matched != len(report.Checked) {
+		t.Errorf("Matched = %d, want %d", report.Matched, len(report.Checked))
+	}
+	if len(report.Allowed) != 1 {
+		t.Fatalf("Allowed = %v, want the unused allowance echoed", report.Allowed)
+	}
+	if report.Allowed[0].Used {
+		t.Error("Allowed[0].Used = true, want false for an allowance that suppressed nothing")
+	}
 }
 
 func TestAllowRequiresAReason(t *testing.T) {
@@ -442,6 +474,138 @@ func TestEmbeddedScaffoldMatchesTheDirectory(t *testing.T) {
 
 	if strings.Join(embedded, "\n") != strings.Join(onDisk, "\n") {
 		t.Errorf("embedded scaffold files = %v, on disk = %v", embedded, onDisk)
+	}
+}
+
+func TestRenderRejectsAnUnknownPlaceholder(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("{{PRODUCTX}}\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	values := trinoValues()
+	values["PRODUCTX"] = "a value for a name the scaffold does not know"
+
+	_, err := scaffold.Render(dir, values)
+	if err == nil {
+		t.Fatal("Render with an unknown placeholder succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "unknown placeholder") || !strings.Contains(err.Error(), "PRODUCTX") {
+		t.Errorf("error = %q, want it to name the unknown placeholder", err)
+	}
+}
+
+func TestRenderRejectsMalformedPlaceholders(t *testing.T) {
+	cases := map[string]string{
+		"hyphen": "{{PRODUCT-NAME}}",
+		"spaces": "{{ PRODUCT }}",
+		"empty":  "{{}}",
+	}
+	for name, token := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte(token+"\n"), 0o644); err != nil {
+				t.Fatalf("write README: %v", err)
+			}
+
+			_, err := scaffold.Render(dir, trinoValues())
+			if err == nil {
+				t.Fatalf("Render of %q succeeded, want an error", token)
+			}
+			if !strings.Contains(err.Error(), "unrendered placeholder") {
+				t.Errorf("error = %q, want an unrendered-placeholder error", err)
+			}
+		})
+	}
+}
+
+func TestRenderRejectsAMalformedPlaceholderInAFileName(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "{{PRODUCT-NAME}}.md"), []byte("text\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	_, err := scaffold.Render(dir, trinoValues())
+	if err == nil {
+		t.Fatal("Render with a malformed placeholder in a file name succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "file name") {
+		t.Errorf("error = %q, want it to name the file name", err)
+	}
+}
+
+func TestRenderPreservesGoTemplateExpressions(t *testing.T) {
+	dir := t.TempDir()
+	content := "{{PRODUCT}} ${{ github.ref }} ${{github.sha}}\n"
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+
+	rendered, err := scaffold.Render(dir, trinoValues())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want := "Trino ${{ github.ref }} ${{github.sha}}\n"
+	if got := string(rendered["README.md"]); got != want {
+		t.Errorf("rendered = %q, want %q", got, want)
+	}
+}
+
+func TestRenderSeparatesModuleFromRepositoryURL(t *testing.T) {
+	values := trinoValues()
+	values["MODULE"] = "github.com/gravitino/terraform-provider-gravitino"
+	values["REPO"] = "caberdo/terraform-provider-gravitino"
+
+	rendered, err := scaffold.Render(scaffoldDir, values)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	documents := string(rendered["NOTICE"]) + string(rendered["SUPPORT.md"]) + string(rendered["SECURITY.md"])
+	if !strings.Contains(documents, "github.com/gravitino/terraform-provider-gravitino") {
+		t.Error("the module path is missing from the rendered documents")
+	}
+	if strings.Contains(documents, "https://github.com/gravitino/terraform-provider-gravitino") {
+		t.Error("a repository URL was built from the module path, which is not the repository")
+	}
+	if !strings.Contains(documents, "https://github.com/caberdo/terraform-provider-gravitino") {
+		t.Error("the repository URL does not use the REPO value")
+	}
+}
+
+func TestRenderUsesTheLicenseValue(t *testing.T) {
+	rendered, err := scaffold.Render(scaffoldDir, rustfsValues())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if got := string(rendered["SECURITY.md"]); !strings.Contains(got, "License: Apache-2.0") {
+		t.Errorf("SECURITY.md does not state the supplied licence: %q", got)
+	}
+	if got := string(rendered["NOTICE"]); !strings.Contains(got, "licensed under Apache-2.0") {
+		t.Errorf("NOTICE does not state the supplied licence: %q", got)
+	}
+	if got := string(rendered["CONTRIBUTING.md"]); !strings.Contains(got, "[Apache-2.0 License](LICENSE)") {
+		t.Errorf("CONTRIBUTING.md does not state the supplied licence: %q", got)
+	}
+}
+
+func TestRenderedReadmeMatchesTheRenderedBaseline(t *testing.T) {
+	for _, fixture := range fixtures {
+		values := trinoValues()
+		if fixture == "rustfs" {
+			values = rustfsValues()
+		}
+
+		rendered, err := scaffold.Render(scaffoldDir, values)
+		if err != nil {
+			t.Fatalf("%s: Render: %v", fixture, err)
+		}
+		baseline, err := coverage.ReadBaseline(bytes.NewReader(rendered[".github/coverage-baseline.txt"]))
+		if err != nil {
+			t.Fatalf("%s: ReadBaseline: %v", fixture, err)
+		}
+		if err := coverage.CheckReadme(rendered["README.md"], baseline, "make coverage-gate"); err != nil {
+			t.Errorf("%s: rendered README disagrees with the rendered baseline: %v", fixture, err)
+		}
 	}
 }
 
