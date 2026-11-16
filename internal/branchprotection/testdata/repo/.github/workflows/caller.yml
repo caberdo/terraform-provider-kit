@@ -1,0 +1,10 @@
+name: CI
+
+# The migration shape: one job delegates the whole pipeline to a reusable
+# workflow. GitHub reports "<caller> / <called>" for each job in the callee.
+on:
+  pull_request:
+
+jobs:
+  ci:
+    uses: ./called.yml

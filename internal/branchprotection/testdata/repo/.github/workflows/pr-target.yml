@@ -1,0 +1,13 @@
+name: Pull request target
+
+# pull_request_target is not pull_request: the script never treated it as a
+# source of required contexts, so neither does the parser.
+on:
+  pull_request_target:
+
+jobs:
+  target:
+    name: Target Job
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo target

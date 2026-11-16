@@ -1,0 +1,10 @@
+name: CI
+
+# A caller in a provider repository points at the kit by tag. The called job
+# names live in the kit, so resolving them needs a fetch.
+on:
+  pull_request:
+
+jobs:
+  ci:
+    uses: caberdo/terraform-provider-kit/.github/workflows/provider-ci.yml@v0.1.0

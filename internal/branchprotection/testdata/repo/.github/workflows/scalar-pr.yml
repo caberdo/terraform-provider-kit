@@ -1,0 +1,10 @@
+name: Scalar trigger
+
+on: pull_request
+
+jobs:
+  scalar:
+    name: Scalar Job
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo scalar

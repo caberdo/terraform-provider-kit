@@ -1,0 +1,808 @@
+# Reusable CI for the caberdo Terraform providers.
+#
+# A caller owns the triggers (`push`, `pull_request`, `merge_group`), the
+# `concurrency:` group and the job-level permissions it grants; this file owns
+# the jobs. The status-check context of each job is
+# `<caller job id> / <name below>`:
+#
+#   lint              Lint & Security
+#   vuln              Vulnerability Scan
+#   test              Test
+#   coverage          Coverage
+#   docs              inputs.docs-job-name   (default "Generate Docs")
+#   mdvalidate        Validate Markdown Files
+#   dependency-review Dependency Review
+#   versions          inputs.versions-job-name
+#
+# Do not rename a job or a display name: several rulesets require these
+# contexts. Additive jobs (vuln, coverage, docs, mdvalidate, versions) report as
+# *skipped* for a provider that does not opt in, and a skipped context satisfies
+# a required check, so they can be added to a ruleset before they do any work.
+#
+# The caller must grant `security-events: write` for `lint` and, for
+# `docs-mode: autopr`, `contents: write` + `pull-requests: write` for `docs`.
+# The other jobs narrow back to `contents: read` themselves.
+name: Provider CI
+
+on:
+  workflow_call:
+    inputs:
+      provider:
+        description: "Provider name without the caberdo/ prefix, as `tfkit examples validate --provider` takes it"
+        required: true
+        type: string
+      provider-display:
+        description: "Display casing of the provider (Trino, Gravitino, agentgateway, OpenMetadata, RustFS)"
+        required: false
+        type: string
+        default: ""
+      module:
+        description: "Go module path declared in go.mod; verified before the build starts"
+        required: true
+        type: string
+      packages:
+        description: "go list pattern the unit suite and the coverage gate use"
+        required: false
+        type: string
+        default: "./internal/..."
+      golangci-config:
+        description: "Path of the golangci-lint configuration"
+        required: false
+        type: string
+        default: ".golangci.yml"
+      golangci-version:
+        description: "golangci-lint version"
+        required: false
+        type: string
+        default: "v2.15.0"
+      golangci-install-mode:
+        description: "binary, or goinstall to build the linter with the module's toolchain"
+        required: false
+        type: string
+        default: "goinstall"
+      gofmt-check:
+        description: "Fail when a tracked Go file is not gofmt-formatted"
+        required: false
+        type: boolean
+        default: false
+      lint-extra-script:
+        description: "Command the lint job runs after golangci-lint; empty disables the step"
+        required: false
+        type: string
+        default: ""
+      govuln-mode:
+        description: "Where dependency scanning runs: script (in lint), action, install, or none"
+        required: false
+        type: string
+        default: "action"
+      vuln-timeout:
+        description: "Timeout of the Vulnerability Scan job, in minutes"
+        required: false
+        type: number
+        default: 15
+      govuln-script:
+        description: "Command the lint job runs for govuln-mode: script"
+        required: false
+        type: string
+        default: "./scripts/govulncheck.sh"
+      gosec-mode:
+        description: "go-run, go-install, or nested-module (built from .github/gosec)"
+        required: false
+        type: string
+        default: "go-run"
+      gosec-version:
+        description: "gosec version for go-run and go-install"
+        required: false
+        type: string
+        default: "v2.30.0"
+      tidy-check:
+        description: "Verify go.mod is tidy and the module hashes match"
+        required: false
+        type: boolean
+        default: true
+      cross-build:
+        description: "Build for windows/amd64 and darwin/arm64"
+        required: false
+        type: boolean
+        default: true
+      examples:
+        description: "Install Terraform and validate every module under examples/"
+        required: false
+        type: boolean
+        default: true
+      terraform-version:
+        description: "Terraform version for the examples step; empty means the newest release"
+        required: false
+        type: string
+        default: "~> 1.9"
+      require-terraform:
+        description: "Fail instead of skipping the examples step when Terraform is missing"
+        required: false
+        type: boolean
+        default: true
+      changelog:
+        description: "Check VERSION, CHANGELOG.md and the README agree (tfkit release check)"
+        required: false
+        type: boolean
+        default: false
+      version-file:
+        description: "Path of the file holding the version being shipped"
+        required: false
+        type: string
+        default: "VERSION"
+      changelog-path:
+        description: "Path of the changelog the release check reads"
+        required: false
+        type: string
+        default: "CHANGELOG.md"
+      docs:
+        description: "Run the documentation checks (the docs job, the drift step in test, markdown)"
+        required: false
+        type: boolean
+        default: true
+      docs-mode:
+        description: "none, drift (fail on a diff) or autopr (open a PR with the regenerated docs)"
+        required: false
+        type: string
+        default: "none"
+      docs-job-name:
+        description: "Display name of the docs job; openmetadata requires the literal Docs"
+        required: false
+        type: string
+        default: "Generate Docs"
+      docs-untracked-check:
+        description: "Also fail when generation left an untracked file under docs/"
+        required: false
+        type: boolean
+        default: false
+      docs-drift-in-test:
+        description: "Run the docs drift step inside the Test job instead of the docs job"
+        required: false
+        type: boolean
+        default: true
+      markdown:
+        description: "Run the markdown link validation job"
+        required: false
+        type: boolean
+        default: false
+      markdown-config:
+        description: "Path of the markdown-link-check configuration"
+        required: false
+        type: string
+        default: "./.github/github-action-markdown-link-check-config.json"
+      fuzz:
+        description: "Replay the committed fuzz seed corpora"
+        required: false
+        type: boolean
+        default: false
+      coverage-job:
+        description: "When the Coverage job runs: none, pull_request or always"
+        required: false
+        type: string
+        default: "none"
+      coverage-merged:
+        description: "The Coverage job gates a unit + acceptance profile instead of the unit profile alone"
+        required: false
+        type: boolean
+        default: false
+      coverage-timeout:
+        description: "Timeout of the Coverage job, in minutes"
+        required: false
+        type: number
+        default: 15
+      coverage-gate-in-test:
+        description: "Enforce the coverage floor inside the Test job"
+        required: false
+        type: boolean
+        default: true
+      coverage-readme-in-test:
+        description: "Check the README coverage block inside the Test job"
+        required: false
+        type: boolean
+        default: false
+      coverage-readme:
+        description: "Check the README coverage block inside the Coverage job"
+        required: false
+        type: boolean
+        default: false
+      coverage-baseline:
+        description: "Path of the coverage baseline"
+        required: false
+        type: string
+        default: ".github/coverage-baseline.txt"
+      coverage-floors:
+        description: "Path of the per-package floors; absent means the total only"
+        required: false
+        type: string
+        default: ".github/coverage-floors.txt"
+      unit-profile:
+        description: "Path the unit suite writes its cover profile to"
+        required: false
+        type: string
+        default: "coverage.out"
+      unit-skip-regex:
+        description: "Tests the unit profile skips"
+        required: false
+        type: string
+        default: "^TestAcc"
+      coverage-note:
+        description: "Paragraph the Coverage section of the job summary starts with"
+        required: false
+        type: string
+        default: ""
+      acceptance-compose:
+        description: "Command the merged Coverage job runs for the acceptance profile"
+        required: false
+        type: string
+        default: "docker compose run --rm test"
+      dependency-review:
+        description: "Run the Dependency Review job on pull requests"
+        required: false
+        type: boolean
+        default: false
+      versions-job:
+        description: "Read the versions file into a JSON matrix on main"
+        required: false
+        type: boolean
+        default: false
+      versions-job-name:
+        description: "Display name of the versions job"
+        required: false
+        type: string
+        default: "Supported Versions"
+      versions-file:
+        description: "Path of the supported-versions file"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  TFKIT: go run github.com/caberdo/terraform-provider-kit/cmd/tfkit@v0.1.0
+
+jobs:
+  lint:
+    name: Lint & Security
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # nested-module (rustfs) builds the scanner from .github/gosec, a nested
+      # module, so its go.sum has to be part of the cache key as well. YAML
+      # cannot express "omit cache-dependency-path", so the step is split.
+      - name: Set up Go
+        if: inputs.gosec-mode != 'nested-module'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: Set up Go
+        if: inputs.gosec-mode == 'nested-module'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            .github/gosec/go.sum
+
+      - name: Check gofmt
+        if: inputs.gofmt-check
+        run: |
+          unformatted=$(git ls-files -z '*.go' | xargs -0 gofmt -l)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt would reformat these files:" >&2
+            echo "$unformatted" >&2
+            echo "run 'gofmt -w' on them (or 'make fmt')" >&2
+            exit 1
+          fi
+
+      # goinstall builds the linter with the toolchain in go.mod instead of
+      # downloading the prebuilt binary, whose Go release cannot read the
+      # export data of a newer module toolchain for the whole v2 line.
+      - name: Run golangci-lint
+        if: inputs.golangci-install-mode == 'goinstall'
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ inputs.golangci-version }}
+          install-mode: goinstall
+          args: --config ${{ inputs.golangci-config }}
+
+      - name: Run golangci-lint
+        if: inputs.golangci-install-mode != 'goinstall'
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ inputs.golangci-version }}
+          args: --config ${{ inputs.golangci-config }}
+
+      - name: Check for unreferenced client methods
+        if: inputs.lint-extra-script != ''
+        run: ${{ inputs.lint-extra-script }}
+
+      # Dependency vulnerabilities are invisible to gosec and CodeQL, which
+      # only read first-party code. govuln-mode: script keeps the scan in this
+      # job, where it has always run for trino and agentgateway.
+      - name: Install govulncheck
+        if: inputs.govuln-mode == 'script'
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Run govulncheck
+        if: inputs.govuln-mode == 'script'
+        run: ${{ inputs.govuln-script }}
+
+      # Building gosec with the job's own toolchain keeps the analyser and the
+      # compiled code on the same Go version: a released prebuilt binary can
+      # refuse the export data of a newer module toolchain. One step, because a
+      # step id must be unique in a job and the outcome feeds a single check.
+      - name: Run Gosec Security Scanner
+        id: gosec
+        continue-on-error: true
+        env:
+          GOSEC_MODE: ${{ inputs.gosec-mode }}
+          GOSEC_VERSION: ${{ inputs.gosec-version }}
+        run: |
+          set -euo pipefail
+          case "$GOSEC_MODE" in
+            go-run)
+              go run "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}" \
+                -fmt sarif -out gosec.sarif -exclude-dir=vendor -tests=false ./
+              ;;
+            go-install)
+              go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
+              "$(go env GOPATH)/bin/gosec" -fmt sarif -out gosec.sarif -exclude-dir=vendor -tests=false ./
+              ;;
+            nested-module)
+              # The nested module pins a tool-only x/tools override, so it needs
+              # the toolchain it declares rather than the job's local one.
+              export GOTOOLCHAIN=auto
+              go build -C .github/gosec -o "$RUNNER_TEMP/gosec" github.com/securego/gosec/v2/cmd/gosec
+              "$RUNNER_TEMP/gosec" -fmt sarif -out gosec.sarif -exclude-dir=vendor -tests=false ./
+              ;;
+            *)
+              echo "unknown gosec-mode '$GOSEC_MODE'" >&2
+              exit 2
+              ;;
+          esac
+
+      - name: Upload security scan results
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        if: always() && hashFiles('gosec.sarif') != ''
+        with:
+          sarif_file: gosec.sarif
+
+      - name: Fail on Gosec findings
+        if: always() && steps.gosec.outcome == 'failure'
+        run: |
+          {
+            echo "## Gosec Security Scanner Found Issues"
+            echo ""
+            if [ -f gosec.sarif ]; then
+              echo "| Rule | File | Line | Description |"
+              echo "|------|------|------|-------------|"
+              jq -r '.runs[0].results[] | "| \(.ruleId) | \(.locations[0].physicalLocation.artifactLocation.uri) | \(.locations[0].physicalLocation.region.startLine) | \(.message.text) |"' gosec.sarif
+            fi
+            echo ""
+            echo "See the **Security** tab for full details."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+  # The job always runs, even when the scan itself happens in `lint` (script)
+  # or nowhere (none): a skipped job skips everything that needs it, and `test`
+  # needs this job so the ordering gravitino already has is preserved.
+  vuln:
+    name: Vulnerability Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.vuln-timeout }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run govulncheck
+        if: inputs.govuln-mode == 'action'
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
+        with:
+          # An empty go-version-input is required: the action defaults it to
+          # `stable` and setup-go prefers it over go-version-file, which would
+          # silently ignore the toolchain from go.mod.
+          go-version-input: ""
+          go-version-file: go.mod
+          repo-checkout: false
+          go-package: ./...
+
+      - name: Set up Go
+        if: inputs.govuln-mode == 'install'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: Install govulncheck
+        if: inputs.govuln-mode == 'install'
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+
+      - name: Run govulncheck
+        if: inputs.govuln-mode == 'install'
+        run: govulncheck ./...
+
+      - name: Nothing to do in this job
+        if: inputs.govuln-mode != 'action' && inputs.govuln-mode != 'install'
+        run: |
+          if [[ "${{ inputs.govuln-mode }}" == "script" ]]; then
+            echo "Dependency scanning runs in the \`Lint & Security\` job (govuln-mode: script)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Dependency scanning is disabled for this provider (govuln-mode: ${{ inputs.govuln-mode }})." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [lint, vuln]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      # gravitino's module path is outside the caberdo organisation, so a
+      # caller that copies another provider's configuration verbatim would
+      # otherwise "pass" while tfkit resolved the wrong module.
+      - name: Verify the module path
+        run: test "$(go list -m)" = "${{ inputs.module }}"
+
+      - name: Build and vet
+        run: |
+          go build ./...
+          go vet ./...
+
+      - name: Verify go.mod is tidy and module hashes match
+        if: inputs.tidy-check
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+          go mod verify
+
+      - name: Cross-platform build
+        if: inputs.cross-build
+        run: |
+          GOOS=windows GOARCH=amd64 go build ./...
+          GOOS=darwin GOARCH=arm64 go build ./...
+
+      - name: Set up Terraform
+        if: inputs.examples
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Validate examples
+        if: inputs.examples
+        env:
+          REQUIRE_TERRAFORM: ${{ inputs.require-terraform && '1' || '' }}
+        run: ${{ env.TFKIT }} examples validate --provider ${{ inputs.provider }}
+
+      # A release pull request is the only change that moves VERSION. Catch a
+      # mismatch with CHANGELOG.md or the README install constraint here instead
+      # of after the merge, where it would fail the tag workflow on main.
+      - name: Check release metadata
+        if: inputs.changelog && inputs.version-file != ''
+        run: >-
+          ${{ env.TFKIT }} release check
+          --version-file ${{ inputs.version-file }}
+          --changelog ${{ inputs.changelog-path }}
+
+      - name: Check generated docs are up to date
+        if: inputs.docs && inputs.docs-drift-in-test
+        run: |
+          go generate ./...
+          git diff --exit-code -- docs/
+
+      - name: Run tests
+        run: go test -v -race -covermode=atomic -coverprofile=${{ inputs.unit-profile }} ${{ inputs.packages }}
+
+      # Replay the committed seed corpora without exploring new inputs, so the
+      # job stays bounded and deterministic.
+      - name: Run fuzz seeds
+        if: inputs.fuzz
+        run: go test ${{ inputs.packages }} -run '^Fuzz'
+
+      - name: Coverage summary
+        if: always()
+        env:
+          COVERAGE_NOTE: ${{ inputs.coverage-note }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f "${{ inputs.unit-profile }}" ]]; then
+            echo "No coverage profile: the test step failed before writing one." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## Coverage"
+            echo ""
+            if [[ -n "$COVERAGE_NOTE" ]]; then
+              printf '%s\n' "$COVERAGE_NOTE"
+              echo ""
+            fi
+            go tool cover -func="${{ inputs.unit-profile }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          go tool cover -func="${{ inputs.unit-profile }}"
+
+      - name: Coverage gate (unit)
+        if: always() && inputs.coverage-gate-in-test
+        run: >-
+          ${{ env.TFKIT }} coverage gate
+          --profile ${{ inputs.unit-profile }}
+          --baseline ${{ inputs.coverage-baseline }}
+          --floors ${{ inputs.coverage-floors }}
+          --packages ${{ inputs.packages }}
+
+      - name: Coverage README is in sync
+        if: inputs.docs && inputs.coverage-readme-in-test
+        run: ${{ env.TFKIT }} coverage readme --check --baseline ${{ inputs.coverage-baseline }}
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: ${{ inputs.unit-profile }}
+          if-no-files-found: ignore
+
+  # Do not wire a provider whose `.github/coverage-baseline.txt` uses the
+  # `measured_*`/`floor_*` dialect (gravitino, rustfs) until Task 14 lands its
+  # dialect support in `tfkit coverage gate`/`coverage readme`: the command reads
+  # the bare-percentage dialect only and exits 2 on those files. Wiring them
+  # early turns this job red for a tooling gap, not for a coverage regression.
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.coverage-timeout }}
+    needs: test
+    if: inputs.coverage-job == 'always' || (inputs.coverage-job == 'pull_request' && github.event_name == 'pull_request')
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      # README's badge and coverage block are generated from the same baseline
+      # the gate enforces, so a dropped floor or a stale README fails here.
+      - name: README in sync with the coverage baseline
+        if: inputs.coverage-readme
+        run: ${{ env.TFKIT }} coverage readme --check --baseline ${{ inputs.coverage-baseline }}
+
+      # The floor is calibrated on a merged profile, so the gate must never be
+      # handed a unit-only number. This job runs the unit suite and the
+      # acceptance container itself rather than trusting an artifact.
+      - name: Unit-test coverage
+        if: inputs.coverage-merged
+        run: go test -count=1 -skip '${{ inputs.unit-skip-regex }}' -covermode=atomic -coverprofile=${{ inputs.unit-profile }} ${{ inputs.packages }}
+
+      - name: Run acceptance tests
+        if: inputs.coverage-merged
+        run: ${{ inputs.acceptance-compose }}
+
+      - name: Coverage gate (unit + acceptance)
+        if: inputs.coverage-merged
+        run: |
+          set -euo pipefail
+          ${{ env.TFKIT }} coverage merge --output coverage-union.out ${{ inputs.unit-profile }} coverage-acceptance.out
+          ${{ env.TFKIT }} coverage gate \
+            --profile coverage-union.out \
+            --baseline ${{ inputs.coverage-baseline }} \
+            --floors ${{ inputs.coverage-floors }} \
+            --packages ${{ inputs.packages }} | tee coverage-gate.txt
+          {
+            echo "## Coverage (unit + acceptance)"
+            echo ""
+            echo "\`${{ inputs.unit-profile }}\` and \`coverage-acceptance.out\` merged by \`tfkit coverage merge\`."
+            echo ""
+            echo '```'
+            cat coverage-gate.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Without coverage-merged the job gates exactly what `test` produced, so
+      # the profile travels as an artifact (the only artifact download in the
+      # reusable set; the pin is new in the migration).
+      - name: Download coverage report
+        if: inputs.coverage-merged == false
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: coverage
+          path: .
+
+      - name: Coverage gate (unit)
+        if: inputs.coverage-merged == false
+        run: >-
+          ${{ env.TFKIT }} coverage gate
+          --profile ${{ inputs.unit-profile }}
+          --baseline ${{ inputs.coverage-baseline }}
+          --floors ${{ inputs.coverage-floors }}
+          --packages ${{ inputs.packages }}
+
+  # The job is deliberately unconditional: openmetadata's ruleset requires a
+  # context literally named `Docs`, and a skipped required check counts as a
+  # pass. A disabled or inapplicable docs check therefore reports success from a
+  # job that actually ran, and a mode it does not understand fails instead of
+  # doing nothing.
+  docs:
+    name: ${{ inputs.docs-job-name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # `autopr` needs a token that may push a branch and open a pull request, and
+    # a job-level `permissions:` block cannot contain an expression. A caller
+    # that grants read only (the drift mode) silently gets read here, because a
+    # called workflow can narrow the token but never widen it.
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      DOCS_ENABLED: ${{ inputs.docs && (inputs.docs-mode == 'drift' || (inputs.docs-mode == 'autopr' && github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+    steps:
+      - name: Fail on an unrecognised docs mode
+        if: inputs.docs && inputs.docs-mode != 'none' && inputs.docs-mode != 'drift' && inputs.docs-mode != 'autopr'
+        run: |
+          echo "docs-mode '${{ inputs.docs-mode }}' is not one of none, drift or autopr." >&2
+          exit 1
+
+      - name: Explain why the docs check did not run
+        if: env.DOCS_ENABLED != 'true'
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.docs }}" != "true" ]]; then
+            reason="docs: false"
+          elif [[ "${{ inputs.docs-mode }}" == "none" ]]; then
+            reason="docs-mode: none, the drift check runs in the Test job"
+          else
+            reason="docs-mode: autopr only opens a pull request on a push to main"
+          fi
+          echo "Documentation checks are disabled for this run ($reason)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Checkout
+        if: env.DOCS_ENABLED == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 1
+
+      - name: Set up Go
+        if: env.DOCS_ENABLED == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      # tfplugindocs reads the provider schema through terraform.
+      - name: Set up Terraform
+        if: env.DOCS_ENABLED == 'true'
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Generate docs
+        if: env.DOCS_ENABLED == 'true'
+        run: go generate ./...
+
+      - name: Check generated docs are committed
+        if: env.DOCS_ENABLED == 'true' && inputs.docs-mode == 'drift'
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- docs/
+          # A new entity adds a new file under docs/; git diff does not see it.
+          if [[ "${{ inputs.docs-untracked-check }}" == "true" ]]; then
+            test -z "$(git status --porcelain -- docs/)"
+          fi
+
+      - name: Open PR with updated docs
+        if: env.DOCS_ENABLED == 'true' && inputs.docs-mode == 'autopr'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/
+          if git diff --cached --quiet; then
+            echo "Docs are already up to date."
+            exit 0
+          fi
+          BRANCH="docs/auto-update-$(date +%Y%m%d%H%M%S)"
+          git checkout -b "$BRANCH"
+          git commit -m "docs: auto-generate provider documentation"
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "docs: auto-generate provider documentation" \
+            --body "Automated docs update triggered by a push to main. Generated by the Docs CI workflow." \
+            --head "$BRANCH" \
+            --base main
+
+  mdvalidate:
+    name: Validate Markdown Files
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: inputs.docs && inputs.markdown
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Markdown Link Validation
+        uses: tcort/github-action-markdown-link-check@e047c5b37f24ab722bbef1a27b6fab7f96bc4068 # v1.1.3
+        with:
+          config-file: ${{ inputs.markdown-config }}
+
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # `if:` keeps this context out of pull_request-less runs, so it can never be
+    # a required status check.
+    if: inputs.dependency-review && github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+
+  versions:
+    name: ${{ inputs.versions-job-name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Only the acceptance workflow consumes the matrix, and that runs on main.
+    if: inputs.versions-job && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    outputs:
+      list: ${{ steps.read.outputs.list }}
+      latest: ${{ steps.read.outputs.latest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same parser as the acceptance workflow's prepare job: comments and
+      # whitespace are stripped, the file stays ordered ascending, and the last
+      # entry is `latest` (rustfs writes the literal `latest`).
+      - name: Read the supported versions into a JSON array
+        id: read
+        run: |
+          set -euo pipefail
+          mapfile -t all < <(sed -e 's/#.*//' -e 's/[[:space:]]//g' "${{ inputs.versions-file }}" | grep -v '^$')
+          if [[ ${#all[@]} -eq 0 ]]; then
+            echo "no supported version found in ${{ inputs.versions-file }}" >&2
+            exit 1
+          fi
+          list=$(printf '%s\n' "${all[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          latest="${all[${#all[@]}-1]}"
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"

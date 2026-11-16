@@ -1,0 +1,310 @@
+# Reusable acceptance suite for the caberdo Terraform providers.
+#
+# The caller owns the triggers. Three jobs are reported:
+#
+#   prepare           Prepare <provider-display> Matrix
+#   acceptance        Acceptance Tests (<provider-display> <version>)   (matrix)
+#   acceptance-single Acceptance                                         (roll-up)
+#
+# `Acceptance` exists because a matrix leg's context contains the version and
+# therefore changes with every versions-file bump: openmetadata's ruleset
+# requires a context literally named `Acceptance`, and a leg name would block
+# every pull request the moment the old name stopped reporting. The roll-up is a
+# non-matrix job with a stable name, `needs: [acceptance]` and explicit failure
+# propagation, so a red leg turns the roll-up red instead of leaving a required
+# check unreported.
+#
+# The caller must grant `actions: write` only if it relies on the log artifacts;
+# everything else runs with `contents: read`.
+name: Provider Acceptance
+
+on:
+  workflow_call:
+    inputs:
+      provider:
+        description: "Provider name without the caberdo/ prefix; names the log artifacts"
+        required: true
+        type: string
+      provider-display:
+        description: "Display casing of the provider, verbatim in the job names"
+        required: true
+        type: string
+      packages:
+        description: "go list pattern the unit profile is produced from"
+        required: false
+        type: string
+        default: "./internal/..."
+      versions-file:
+        description: "Path of the supported-versions file, ordered ascending"
+        required: true
+        type: string
+      version-env:
+        description: "Environment variable naming the server version (TRINO_VERSION, RUSTFS_VERSION, ...)"
+        required: true
+        type: string
+      expect-version-env:
+        description: "Environment variable naming the version the suite expects; empty disables it"
+        required: false
+        type: string
+        default: ""
+      compose-project-prefix:
+        description: "Prefix for COMPOSE_PROJECT_NAME, so matrices cannot share containers; empty leaves it unset"
+        required: false
+        type: string
+        default: ""
+      compose-dot-to-dash:
+        description: "Rewrite '.' to '-' in the compose project name (agentgateway)"
+        required: false
+        type: boolean
+        default: false
+      acceptance-compose:
+        description: "Command that runs the acceptance container"
+        required: false
+        type: string
+        default: "docker compose run --rm test"
+      compose-file-args:
+        description: "Arguments between `docker compose` and the subcommand, including a trailing space (rustfs)"
+        required: false
+        type: string
+        default: ""
+      acceptance-timeout:
+        description: "Timeout of each acceptance job, in minutes"
+        required: false
+        type: number
+        default: 45
+      max-parallel:
+        description: "Acceptance cells that may run at once"
+        required: false
+        type: number
+        default: 2
+      gate-cell:
+        description: "Which cell enforces the coverage floor: none, newest or literal-latest"
+        required: false
+        type: string
+        default: "none"
+      fail-on-missing-acceptance-profile:
+        description: "Fail when the acceptance container left no cover profile"
+        required: false
+        type: boolean
+        default: true
+      raise-max-map-count:
+        description: "Raise vm.max_map_count before the suite (Elasticsearch-backed stacks)"
+        required: false
+        type: boolean
+        default: false
+      unit-profile:
+        description: "Path the unit suite writes its cover profile to"
+        required: false
+        type: string
+        default: "coverage.out"
+      unit-skip-regex:
+        description: "Tests the unit profile skips"
+        required: false
+        type: string
+        default: "^TestAcc"
+
+permissions:
+  contents: read
+
+env:
+  TFKIT: go run github.com/caberdo/terraform-provider-kit/cmd/tfkit@v0.1.0
+
+jobs:
+  prepare:
+    name: Prepare ${{ inputs.provider-display }} Matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      list: ${{ steps.read.outputs.list }}
+      latest: ${{ steps.read.outputs.latest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The file is the single source of truth and is ordered ascending: the
+      # first line is the declared floor, the rest is the rolling window.
+      # Pull requests get the floor plus the newest release (fast signal); main
+      # and the merge queue get the whole window. Comments are always stripped,
+      # so a file without them (trino) parses exactly as before.
+      - name: Read the supported versions into a JSON array
+        id: read
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          mapfile -t all < <(sed -e 's/#.*//' -e 's/[[:space:]]//g' "${{ inputs.versions-file }}" | grep -v '^$')
+          if [[ ${#all[@]} -eq 0 ]]; then
+            echo "no supported ${{ inputs.provider-display }} version found in ${{ inputs.versions-file }}" >&2
+            exit 1
+          fi
+          floor="${all[0]}"
+          latest="${all[${#all[@]}-1]}"
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            list=$(jq -c -n --arg floor "$floor" --arg latest "$latest" '[$floor, $latest] | unique')
+          else
+            list=$(printf '%s\n' "${all[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          fi
+
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "Matrix for $EVENT_NAME: $list (floor $floor, latest $latest)"
+
+  acceptance:
+    name: Acceptance Tests (${{ inputs.provider-display }} ${{ matrix.version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.acceptance-timeout }}
+    needs: prepare
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.max-parallel }}
+      matrix:
+        version: ${{ fromJSON(needs.prepare.outputs.list) }}
+    # A job-level `env:` key cannot be an expression, so every provider variable
+    # is declared and the four that do not apply are empty: the acceptance
+    # suites never read a variable they did not ask for.
+    env:
+      TRINO_VERSION: ${{ inputs.version-env == 'TRINO_VERSION' && matrix.version || '' }}
+      GRAVITINO_VERSION: ${{ inputs.version-env == 'GRAVITINO_VERSION' && matrix.version || '' }}
+      AGENTGATEWAY_VERSION: ${{ inputs.version-env == 'AGENTGATEWAY_VERSION' && matrix.version || '' }}
+      OPENMETADATA_VERSION: ${{ inputs.version-env == 'OPENMETADATA_VERSION' && matrix.version || '' }}
+      RUSTFS_VERSION: ${{ inputs.version-env == 'RUSTFS_VERSION' && matrix.version || '' }}
+      TRINO_EXPECT_VERSION: ${{ inputs.expect-version-env == 'TRINO_EXPECT_VERSION' && matrix.version || '' }}
+      AGENTGATEWAY_EXPECT_VERSION: ${{ inputs.expect-version-env == 'AGENTGATEWAY_EXPECT_VERSION' && matrix.version || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # One compose project per version so matrices cannot share containers,
+      # volumes or port bindings. The name is assembled in shell because a
+      # job-level `env:` key cannot be an expression and the expression language
+      # has no `replace`.
+      - name: Resolve the compose project name
+        if: inputs.compose-project-prefix != ''
+        env:
+          PREFIX: ${{ inputs.compose-project-prefix }}
+          DOT_TO_DASH: ${{ inputs.compose-dot-to-dash }}
+          MATRIX_VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          version="$MATRIX_VERSION"
+          if [[ "$DOT_TO_DASH" == "true" ]]; then
+            version="${version//./-}"
+          fi
+          echo "COMPOSE_PROJECT_NAME=${PREFIX}-acc-${version}" >> "$GITHUB_ENV"
+
+      # Elasticsearch refuses to start when vm.max_map_count is the
+      # distribution default (65530).
+      - name: Raise vm.max_map_count for Elasticsearch
+        if: inputs.raise-max-map-count
+        run: sudo sysctl -w vm.max_map_count=262144
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      # The acceptance container writes coverage-acceptance.out into the mounted
+      # worktree; the unit profile is produced here so both can be merged into
+      # the one statement-coverage number the project publishes.
+      - name: Unit-test coverage
+        run: go test -count=1 -skip '${{ inputs.unit-skip-regex }}' -covermode=atomic -coverprofile=${{ inputs.unit-profile }} ${{ inputs.packages }}
+
+      - name: Run acceptance tests
+        run: ${{ inputs.acceptance-compose }}
+
+      # Without this a failed service exits with a bare "didn't complete
+      # successfully: exit 1" and the container's own output is lost with the
+      # runner. Dump before teardown removes the containers.
+      - name: Dump ${{ inputs.provider-display }} logs on failure
+        if: failure()
+        run: docker compose ${{ inputs.compose-file-args }}logs --no-color > "${{ inputs.provider }}-${{ matrix.version }}.log" || true
+
+      - name: Upload ${{ inputs.provider-display }} logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.provider }}-${{ matrix.version }}-logs
+          path: ${{ inputs.provider }}-${{ matrix.version }}.log
+          if-no-files-found: ignore
+
+      - name: Tear down the acceptance environment
+        if: always()
+        run: docker compose ${{ inputs.compose-file-args }}down -v
+
+      - name: Combined coverage (unit + acceptance)
+        if: always()
+        env:
+          FAIL_ON_MISSING: ${{ inputs.fail-on-missing-acceptance-profile }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f ${{ inputs.unit-profile }} || ! -f coverage-acceptance.out ]]; then
+            echo "Incomplete coverage profiles: unit \`${{ inputs.unit-profile }}\` and acceptance" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`coverage-acceptance.out\` are both required; one is missing." >> "$GITHUB_STEP_SUMMARY"
+            status=0
+            if [[ "$FAIL_ON_MISSING" == "true" ]]; then
+              status=1
+            fi
+            exit "$status"
+          fi
+          ${{ env.TFKIT }} coverage merge --output coverage-union.out ${{ inputs.unit-profile }} coverage-acceptance.out
+          {
+            echo "## Coverage (unit + acceptance)"
+            echo ""
+            echo "\`${{ inputs.unit-profile }}\` and \`coverage-acceptance.out\` merged by \`tfkit coverage merge\`."
+            echo ""
+            go tool cover -func=coverage-union.out
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The floor is calibrated on the newest supported server, so an older cell
+      # is reported but not gated: it legitimately skips version-gated tests.
+      - name: Coverage gate (unit + acceptance)
+        if: inputs.gate-cell == 'newest' && matrix.version == needs.prepare.outputs.latest || inputs.gate-cell == 'literal-latest' && matrix.version == 'latest'
+        run: >-
+          ${{ env.TFKIT }} coverage gate
+          --profile coverage-union.out
+          --packages ${{ inputs.packages }}
+
+      - name: Upload combined coverage
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-acceptance-${{ matrix.version }}
+          path: |
+            coverage-acceptance.out
+            coverage-union.out
+          if-no-files-found: ignore
+
+  # A stable, non-matrix context over the matrix. `always()` is what lets it
+  # report when a leg failed; the explicit step below turns that into a red
+  # check, because a skipped required check counts as a pass.
+  acceptance-single:
+    name: Acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [acceptance]
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Report the matrix outcome
+        env:
+          MATRIX_RESULT: ${{ needs.acceptance.result }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Acceptance"
+            echo ""
+            echo "Matrix result: **$MATRIX_RESULT**"
+            echo ""
+            echo "The per-version jobs report as \`Acceptance Tests (${{ inputs.provider-display }} <version>)\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$MATRIX_RESULT" != "success" ]]; then
+            echo "The acceptance matrix did not pass ($MATRIX_RESULT)." >&2
+            exit 1
+          fi

@@ -1,0 +1,10 @@
+name: Sequence trigger
+
+on: [push, pull_request]
+
+jobs:
+  sequence:
+    name: Sequence Job
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo sequence
