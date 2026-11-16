@@ -59,6 +59,8 @@ var enforced = []string{
 	".github/CODEOWNERS",
 	".github/dependabot.yml",
 	".github/PULL_REQUEST_TEMPLATE.md",
+	"changelog.d/README.md",
+	"changelog.d/.gitkeep",
 }
 
 // placeholderPattern matches a {{NAME}} placeholder. The name is matched

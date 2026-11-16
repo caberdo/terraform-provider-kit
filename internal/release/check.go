@@ -1,10 +1,11 @@
 // Package release validates the release metadata a release pull request
-// carries: the version in VERSION, the changelog section that documents it and
-// the README install constraint.
+// carries: the version being shipped, the changelog section that documents it
+// and the README install constraint.
 //
-// It replaces scripts/release-check.sh. The release pull request is the only
-// change that moves VERSION, and merging it starts the tag workflow, so the
-// three files disagreeing is caught before the merge instead of after it.
+// It replaces scripts/release-check.sh. The released version is the last git
+// tag, not a file the repository carries, so a repository without VERSION still
+// has one version to check: the tag that was cut last. Supplying VersionFile
+// keeps the older flow, because a repository mid-migration may still hold one.
 //
 // Check returns the problems it finds instead of stopping at the first, so a
 // broken release pull request is fixed in one pass. The shell script stopped at
@@ -14,17 +15,25 @@
 package release
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 )
 
 // Default paths, used when Options leaves a field empty.
 const (
+	// DefaultVersionFile is the file tfkit probes when --version-file was not
+	// given. It is not a default for Check: an empty Options.VersionFile means
+	// the version comes from the last tag. The CLI keeps reading VERSION when a
+	// repository still has one, so the migration needs no flag.
 	DefaultVersionFile = "VERSION"
-	DefaultChangelog   = "CHANGELOG.md"
-	DefaultReadme      = "README.md"
+	// DefaultChangelog is the changelog beside the working directory.
+	DefaultChangelog = "CHANGELOG.md"
+	// DefaultReadme is the README beside the working directory.
+	DefaultReadme = "README.md"
 )
 
 // versionPattern is the only acceptable content of the version file: X.Y.Z
@@ -38,43 +47,84 @@ var unreleasedPattern = regexp.MustCompile(`^## Unreleased[[:space:]]*$`)
 // releasedPattern finds a released section heading and captures its version.
 var releasedPattern = regexp.MustCompile(`^## \[([0-9]+\.[0-9]+\.[0-9]+)\]`)
 
-// Options names the three files Check reads. An empty field means the default
-// path beside the working directory.
+// Options names the inputs Check reads. An empty VersionFile derives the
+// version from the last git tag; a non-empty one reads that file.
 type Options struct {
-	// VersionFile holds the version being shipped, such as "VERSION".
+	// VersionFile holds the version being shipped, such as "VERSION". Empty
+	// means the last git tag supplies it.
 	VersionFile string
 	// Changelog holds the release sections, such as "CHANGELOG.md".
 	Changelog string
 	// Readme holds the install constraint, such as "README.md".
 	Readme string
+	// LastTag returns the last git tag. nil means LastTag, which runs
+	// `git describe --tags --abbrev=0`. Tests inject a tag so the check does
+	// not depend on the checkout they run in.
+	LastTag func() (string, error)
 }
 
 // Report is the outcome of a consistent or inconsistent run. Version is the
-// version the file held with its whitespace stripped. Problems lists every
-// inconsistency, in the order the checks run; an empty list means the metadata
-// agrees.
+// version being shipped, with a leading 'v' removed when a tag supplied it.
+// Tag is the last git tag the version was derived from, empty when a version
+// file supplied it. Problems lists every inconsistency, in the order the checks
+// run; an empty list means the metadata agrees.
 type Report struct {
 	Version  string
+	Tag      string
 	Problems []string
 }
 
-// Check verifies that the version file, the changelog and the README agree.
+// LastTag returns the last tag that `git describe` reaches from the working
+// directory. A repository with no tag, a missing git binary and a directory
+// outside a repository are all the same unusable-input class: error, which the
+// CLI reports as exit code 2.
+func LastTag() (string, error) {
+	out, err := exec.CommandContext(context.Background(), "git", "describe", "--tags", "--abbrev=0").Output()
+	if err != nil {
+		return "", fmt.Errorf("no git tag found: %w", err)
+	}
+	tag := strings.TrimSpace(string(out))
+	if tag == "" {
+		return "", fmt.Errorf("no git tag found: git describe returned an empty tag")
+	}
+	return tag, nil
+}
+
+// Check verifies that the shipped version, the changelog and the README agree.
 //
 // A reported problem is an inconsistency and belongs in the exit-1 class; an
-// error means a required file is missing or unreadable and belongs in the
-// exit-2 class. Every independent inconsistency is reported in one run.
+// error means a required file is missing or unreadable, or no tag exists, and
+// belongs in the exit-2 class. Every independent inconsistency is reported in
+// one run.
 func Check(opts Options) (Report, error) {
-	versionFile := orDefault(opts.VersionFile, DefaultVersionFile)
 	changelogPath := orDefault(opts.Changelog, DefaultChangelog)
 	readmePath := orDefault(opts.Readme, DefaultReadme)
 
-	// All three files are read before anything is checked, as the shell
-	// script's `-f` guard did: nothing can be compared without all of them, and
-	// a missing file is the exit-2 class rather than a reported problem.
-	versionContent, err := readFile(versionFile)
-	if err != nil {
-		return Report{}, err
+	var version, tag string
+	if opts.VersionFile == "" {
+		lastTag := opts.LastTag
+		if lastTag == nil {
+			lastTag = LastTag
+		}
+		found, err := lastTag()
+		if err != nil {
+			return Report{}, err
+		}
+		tag = strings.TrimSpace(found)
+		if tag == "" {
+			return Report{}, fmt.Errorf("no git tag found")
+		}
+		// The release tags carry a 'v' prefix; the changelog, the README
+		// constraint and the version file do not.
+		version = strings.TrimPrefix(tag, "v")
+	} else {
+		content, err := readFile(opts.VersionFile)
+		if err != nil {
+			return Report{}, err
+		}
+		version = stripWhitespace(content)
 	}
+
 	changelog, err := readFile(changelogPath)
 	if err != nil {
 		return Report{}, err
@@ -84,7 +134,6 @@ func Check(opts Options) (Report, error) {
 		return Report{}, err
 	}
 
-	version := stripWhitespace(versionContent)
 	var problems []string
 	fail := func(format string, args ...any) {
 		problems = append(problems, fmt.Sprintf(format, args...))
@@ -96,7 +145,11 @@ func Check(opts Options) (Report, error) {
 	// one thing that needs fixing.
 	validVersion := versionPattern.MatchString(version)
 	if !validVersion {
-		fail("'%s' must hold X.Y.Z without a leading 'v', got '%s'", versionFile, version)
+		if tag != "" {
+			fail("the last git tag '%s' must name X.Y.Z without a leading 'v', got '%s'", tag, version)
+		} else {
+			fail("'%s' must hold X.Y.Z without a leading 'v', got '%s'", opts.VersionFile, version)
+		}
 	}
 
 	if found := countUnreleased(changelog); found != 1 {
@@ -108,8 +161,13 @@ func Check(opts Options) (Report, error) {
 	case !hasRelease:
 		fail("'%s' has no '## [X.Y.Z]' release section", changelogPath)
 	case validVersion && released != version:
-		fail("the newest changelog section is '%s' but '%s' says '%s'",
-			released, versionFile, version)
+		if tag != "" {
+			fail("the newest changelog section is '%s' but the last git tag is '%s', which names '%s'",
+				released, tag, version)
+		} else {
+			fail("the newest changelog section is '%s' but '%s' says '%s'",
+				released, opts.VersionFile, version)
+		}
 	}
 
 	if validVersion {
@@ -124,7 +182,7 @@ func Check(opts Options) (Report, error) {
 		}
 	}
 
-	return Report{Version: version, Problems: problems}, nil
+	return Report{Version: version, Tag: tag, Problems: problems}, nil
 }
 
 // readFile reads one required file. A path that is not a regular file is

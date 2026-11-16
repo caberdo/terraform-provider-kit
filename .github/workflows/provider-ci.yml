@@ -13,11 +13,12 @@
 #   mdvalidate        Validate Markdown Files
 #   dependency-review Dependency Review
 #   versions          Supported Versions
+#   changelog         Changelog Fragment
 #
 # Do not rename a job or a display name: several rulesets require these
-# contexts. Additive jobs (coverage, mdvalidate, versions) report as *skipped*
-# for a provider that does not opt in, and a skipped context satisfies a
-# required check, so they can be added to a ruleset before they do any work.
+# contexts. Additive jobs (coverage, mdvalidate, versions, changelog) report as
+# *skipped* for a provider that does not opt in, and a skipped context satisfies
+# a required check, so they can be added to a ruleset before they do any work.
 # `docs` is additive too, but its work is gated at step level by
 # `env.DOCS_ENABLED` instead of a job-level `if:`, so the job itself has no
 # `if:`. `vuln` is not additive: no job-level `if:` ever skips it, so it runs
@@ -142,15 +143,15 @@ on:
         type: boolean
         default: true
       changelog:
-        description: "Check VERSION, CHANGELOG.md and the README agree (tfkit release check)"
+        description: "Check the released version, CHANGELOG.md and the README agree (tfkit release check)"
         required: false
         type: boolean
         default: false
       version-file:
-        description: "Path of the file holding the version being shipped"
+        description: "Path of the file holding the version being shipped; empty derives it from the last git tag"
         required: false
         type: string
-        default: "VERSION"
+        default: ""
       changelog-path:
         description: "Path of the changelog the release check reads"
         required: false
@@ -266,6 +267,11 @@ on:
         required: false
         type: string
         default: ""
+      changelog-fragments:
+        description: "Require a changelog.d/ fragment on pull requests (opt-in; a skipped job satisfies a required check)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -472,6 +478,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # tfkit release check derives the shipped version from the last tag,
+          # which a shallow checkout does not fetch.
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -522,15 +532,19 @@ jobs:
           REQUIRE_TERRAFORM: ${{ inputs.require-terraform && '1' || '' }}
         run: ${{ env.TFKIT }} examples validate --provider ${{ inputs.provider }}
 
-      # A release pull request is the only change that moves VERSION. Catch a
-      # mismatch with CHANGELOG.md or the README install constraint here instead
-      # of after the merge, where it would fail the tag workflow on main.
+      # A release pull request is the only change that moves the changelog's
+      # newest section. Catch a mismatch with the README install constraint here
+      # instead of after the merge, where it would fail the tag workflow on
+      # main. With no version file the released version is the last tag.
       - name: Check release metadata
-        if: inputs.changelog && inputs.version-file != ''
-        run: >-
-          ${{ env.TFKIT }} release check
-          --version-file ${{ inputs.version-file }}
-          --changelog ${{ inputs.changelog-path }}
+        if: inputs.changelog
+        run: |
+          set -euo pipefail
+          args=(release check --changelog "${{ inputs.changelog-path }}")
+          if [[ -n "${{ inputs.version-file }}" ]]; then
+            args+=(--version-file "${{ inputs.version-file }}")
+          fi
+          ${{ env.TFKIT }} "${args[@]}"
 
       - name: Check generated docs are up to date
         if: inputs.docs && inputs.docs-drift-in-test
@@ -837,3 +851,104 @@ jobs:
           latest="${all[${#all[@]}-1]}"
           echo "list=$list" >> "$GITHUB_OUTPUT"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
+
+  # Opt-in: every pull request that changes Go code, workflows, docs or examples
+  # carries its own fragment under `changelog.d/`, so two pull requests cannot
+  # conflict in CHANGELOG.md and a release pull request only has to assemble
+  # them. The job is gated on the `changelog-fragments` input and reports as
+  # *skipped* when it is off; a skipped job satisfies a required check, so it
+  # must not be added to a ruleset until every caller opts in.
+  #
+  # The exemptions are the ones terraform-provider-rustfs already implements:
+  # a `release/*` branch (the release pull request edits CHANGELOG.md by
+  # design), the `skip-changelog` label (no user-observable change) and
+  # dependabot, which can add neither a fragment nor a label.
+  changelog:
+    name: Changelog Fragment
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: inputs.changelog-fragments && github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Require a well-formed fragment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          # Backticks in the messages below are literal Markdown.
+          # shellcheck disable=SC2016
+          set -euo pipefail
+
+          if [[ "$HEAD_REF" == release/* ]]; then
+            echo "Release branch: the changelog is assembled from changelog.d/ by scripts/changelog-release.sh."
+            exit 0
+          fi
+
+          labels="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.labels[].name')"
+          if grep -qx 'skip-changelog' <<<"$labels"; then
+            echo "skip-changelog label present; no fragment required."
+            exit 0
+          fi
+
+          files="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --paginate \
+            --jq '.[] | [.status, .filename] | @tsv')"
+
+          tab=$'\t'
+
+          if grep -qE "^(added|modified|removed|renamed)${tab}CHANGELOG\.md$" <<<"$files"; then
+            {
+              echo "## Do not edit CHANGELOG.md in a feature pull request"
+              echo ""
+              echo "Add \`changelog.d/<issue>-<kind>-<slug>.md\` instead. The release pull request"
+              echo "bundles the fragments with \`make changelog-release VERSION=x.y.z\`."
+            } >>"$GITHUB_STEP_SUMMARY"
+            echo "CHANGELOG.md must not be edited outside a release/* branch." >&2
+            exit 1
+          fi
+
+          fragments=()
+          while IFS= read -r fragment; do
+            [[ -z "$fragment" ]] && continue
+            fragments+=("$fragment")
+          done < <(grep -E "^added${tab}changelog\.d/[^/]+\.md$" <<<"$files" | cut -f2 | grep -v '^changelog\.d/README\.md$' || true)
+
+          if (( ${#fragments[@]} == 0 )); then
+            {
+              echo "## Missing changelog fragment"
+              echo ""
+              echo "Add \`changelog.d/<issue>-<kind>-<slug>.md\`, or label the pull request"
+              echo "\`skip-changelog\` when no user can observe the change."
+            } >>"$GITHUB_STEP_SUMMARY"
+            echo "No changelog.d/ fragment added." >&2
+            exit 1
+          fi
+
+          pattern='^changelog\.d/[0-9]+-(breaking|feature|improvement|bugfix|security|chore)-[a-z0-9][a-z0-9-]*\.md$'
+          bad=()
+          for fragment in "${fragments[@]}"; do
+            if [[ ! "$fragment" =~ $pattern ]]; then
+              bad+=("$fragment")
+            fi
+          done
+
+          if (( ${#bad[@]} > 0 )); then
+            {
+              echo "## Malformed changelog fragment name"
+              echo ""
+              echo "Expected \`changelog.d/<issue>-<kind>-<slug>.md\`, where \`<kind>\` is one of"
+              echo "\`breaking\`, \`feature\`, \`improvement\`, \`bugfix\`, \`security\` or \`chore\`."
+              echo ""
+              echo "\`\`\`"
+              printf '%s\n' "${bad[@]}"
+              echo "\`\`\`"
+            } >>"$GITHUB_STEP_SUMMARY"
+            echo "Malformed fragment name(s):" >&2
+            printf '%s\n' "${bad[@]}" >&2
+            exit 1
+          fi
+
+          echo "Changelog fragments:"
+          printf '%s\n' "${fragments[@]}"

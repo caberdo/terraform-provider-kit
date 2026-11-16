@@ -1,14 +1,24 @@
 # Reusable release for the caberdo Terraform providers.
 #
-# Two jobs, both driven by the caller's triggers:
+# The released version is the last git tag; a repository does not carry it as a
+# file. The default, tag-driven flow therefore needs no version file:
+#
+#   - the caller triggers on `push: tags: ["v*"]`; the pushed tag is published
+#   - a `workflow_dispatch` with the caller's `tag` input republishes an
+#     existing tag, or publishes a tag pushed without a workflow run
+#
+# The `tag` job exists only for a repository that still supplies `version-file`.
+# With the default empty value it is skipped, so nothing drains a file and
+# `workflow_dispatch`/tag pushes are the only release entry points:
 #
 #   tag        create the signed tag (a push that changed the version file, or
 #              a workflow_dispatch) and pass it to the release job
 #   goreleaser build, attest, SBOM and publish the release
 #
-# The caller keeps `on: push: branches: [main]`, `on: push: tags: ["v*"]` and
-# `on: workflow_dispatch` (including the `version`, `release_type` and `tag`
-# inputs it forwards), plus the `create-release-tag` concurrency group.
+# The caller keeps `on: push: tags: ["v*"]` and `on: workflow_dispatch`
+# (including the `version`, `release_type` and `tag` inputs it forwards), plus
+# the `create-release-tag` concurrency group. A caller that still carries a
+# version file also keeps `on: push: branches: [main]`.
 #
 # A `paths: [VERSION]` trigger filter cannot be combined reliably with a
 # `tags: ["v*"]` trigger in one `push:` block, so the filter is a job guard that
@@ -38,10 +48,10 @@ on:
         type: string
         default: ".github/goreleaser.yml"
       version-file:
-        description: "File whose change triggers a tag; empty means dispatch or tag pushes only"
+        description: "File whose change triggers a tag; empty (the default) releases from tag pushes and workflow_dispatch"
         required: false
         type: string
-        default: "VERSION"
+        default: ""
       changelog-path:
         description: "Path of the changelog the tag job checks for a dated section"
         required: false
@@ -88,6 +98,9 @@ jobs:
     name: Tag the release
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # A tag-driven repository has no version file to drain: the tag job exists
+    # only for the caller that still supplies one.
+    if: inputs.version-file != ''
     permissions:
       contents: write
     outputs:
@@ -269,9 +282,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: tag
-    # A skipped tag (no version change, or an already released version)
-    # publishes nothing.
-    if: inputs.tag != '' || needs.tag.outputs.tag != ''
+    # `always()` stops a skipped `tag` job from skipping this one by
+    # association; the explicit result test still stops it after a failure. On
+    # the tag-driven path the tag job does not run at all: a pushed tag is the
+    # trigger, and a dispatch carries the tag to (re)publish. A skipped tag (no
+    # version change, or an already released version) publishes nothing.
+    if: |
+      always() &&
+      (needs.tag.result == 'success' || needs.tag.result == 'skipped') &&
+      (inputs.tag != '' || needs.tag.outputs.tag != '' ||
+       (inputs.version-file == '' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')))
     # `contents: write` uploads the release. `id-token: write` mints the OIDC
     # identity `actions/attest` signs the provenance with, and
     # `attestations: write` stores that provenance in the repository record.

@@ -244,7 +244,6 @@ func TestCheckReportsEveryProblemInOneRun(t *testing.T) {
 func TestCheckDefaultsToTheRepositoryFiles(t *testing.T) {
 	t.Chdir(t.TempDir())
 	for name, content := range map[string]string{
-		"VERSION":      "1.2.3\n",
 		"CHANGELOG.md": changelogCut,
 		"README.md":    readmeInstall,
 	} {
@@ -253,7 +252,11 @@ func TestCheckDefaultsToTheRepositoryFiles(t *testing.T) {
 		}
 	}
 
-	report, err := release.Check(release.Options{})
+	// The version has no default file: an empty VersionFile derives it from the
+	// last tag, so the tag is the input this fixture supplies.
+	report, err := release.Check(release.Options{
+		LastTag: func() (string, error) { return "v1.2.3", nil },
+	})
 	if err != nil {
 		t.Fatalf("Check returned an error: %v", err)
 	}
@@ -263,5 +266,74 @@ func TestCheckDefaultsToTheRepositoryFiles(t *testing.T) {
 	}
 	if len(report.Problems) != 0 {
 		t.Errorf("problems = %q, want none", report.Problems)
+	}
+}
+
+// tagMetadata builds options that derive the version from tag instead of
+// reading a version file.
+func tagMetadata(t *testing.T, tag, changelog, readme string) release.Options {
+	t.Helper()
+
+	dir := t.TempDir()
+	opts := release.Options{
+		Changelog: filepath.Join(dir, "CHANGELOG.md"),
+		Readme:    filepath.Join(dir, "README.md"),
+		LastTag:   func() (string, error) { return tag, nil },
+	}
+	for path, content := range map[string]string{
+		opts.Changelog: changelog,
+		opts.Readme:    readme,
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	return opts
+}
+
+func TestCheckDerivesTheVersionFromTheLastTag(t *testing.T) {
+	for _, tag := range []string{"v1.2.3", "1.2.3"} {
+		t.Run(tag, func(t *testing.T) {
+			report := checkProbs(t, tagMetadata(t, tag, changelogCut, readmeInstall))
+
+			if got, want := report.Version, "1.2.3"; got != want {
+				t.Errorf("version = %q, want %q", got, want)
+			}
+			if got, want := report.Tag, tag; got != want {
+				t.Errorf("tag = %q, want %q", got, want)
+			}
+			if len(report.Problems) != 0 {
+				t.Errorf("problems = %q, want none", report.Problems)
+			}
+		})
+	}
+}
+
+func TestCheckRejectsATagTheChangelogDoesNotDocument(t *testing.T) {
+	// The last tag is 1.2.2 while the changelog's newest section is 1.2.3.
+	report := checkProbs(t, tagMetadata(t, "v1.2.2", changelogCut, readmeInstall))
+
+	wantProblem(t, report, "the newest changelog section is '1.2.3' but the last git tag is 'v1.2.2', which names '1.2.2'")
+}
+
+func TestCheckRejectsATagThatIsNotSemver(t *testing.T) {
+	report := checkProbs(t, tagMetadata(t, "nightly", changelogCut, readmeInstall))
+
+	wantProblem(t, report, "the last git tag 'nightly' must name X.Y.Z without a leading 'v'")
+}
+
+func TestCheckReturnsAnErrorWhenThereIsNoTag(t *testing.T) {
+	opts := tagMetadata(t, "", changelogCut, readmeInstall)
+	opts.LastTag = func() (string, error) {
+		return "", fmt.Errorf("no git tag found")
+	}
+
+	_, err := release.Check(opts)
+
+	if err == nil {
+		t.Fatal("Check returned nil, want an error when no tag exists")
+	}
+	if !strings.Contains(err.Error(), "no git tag found") {
+		t.Errorf("error = %q, want it to say no tag was found", err)
 	}
 }

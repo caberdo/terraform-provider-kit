@@ -181,7 +181,7 @@ func TestRunScaffoldCheckPassesAnAlignedRepository(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "14 files match the scaffold") {
+	if !strings.Contains(stdout.String(), "16 files match the scaffold") {
 		t.Errorf("stdout = %q, want the match count", stdout.String())
 	}
 	if stderr.String() != "" {
@@ -495,7 +495,7 @@ func TestRunScaffoldCheckEchoesAnUnusedAllowance(t *testing.T) {
 	if !strings.Contains(stdout.String(), "unused") {
 		t.Errorf("stdout = %q, want the unused allowance echoed", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "14 files match the scaffold") {
+	if !strings.Contains(stdout.String(), "16 files match the scaffold") {
 		t.Errorf("stdout = %q, want the true matched count", stdout.String())
 	}
 }
@@ -512,7 +512,7 @@ func TestRunScaffoldCheckDerivesThePackagePattern(t *testing.T) {
 		t.Fatalf("exit = %d, want 0; ./... must be derived from GNUmakefile (stderr = %q)",
 			code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "14 files match the scaffold") {
+	if !strings.Contains(stdout.String(), "16 files match the scaffold") {
 		t.Errorf("stdout = %q, want the match count", stdout.String())
 	}
 }

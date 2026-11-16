@@ -89,7 +89,7 @@ const releaseUsage = `Usage:
   tfkit release check [flags]
 
 Commands:
-  check  Verify that VERSION, the changelog and the README agree.
+  check  Verify that the released version, the changelog and the README agree.
 
 Run "tfkit release <command> -h" for more about a command.
 `
@@ -471,23 +471,29 @@ func runRelease(args []string, stdout, stderr io.Writer) int {
 func runReleaseCheck(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("tfkit release check", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	versionFile := flags.String("version-file", release.DefaultVersionFile,
-		"path of the file holding the version being shipped")
+	versionFile := flags.String("version-file", "",
+		"path of the file holding the version; empty derives it from the last git tag")
 	changelog := flags.String("changelog", release.DefaultChangelog, "path of the changelog")
 	readme := flags.String("readme", release.DefaultReadme,
 		"path of the README carrying the install constraint")
 	flags.Usage = func() {
 		_, _ = io.WriteString(stderr, `usage: tfkit release check [flags]
 
-Verifies that the version in the version file has a dated changelog section and
-that the README installs that minor. Every inconsistency is reported in one run,
-so a release pull request is fixed in one pass.
+Verifies that the version being shipped has a dated changelog section and that
+the README installs that minor. Every inconsistency is reported in one run, so a
+release pull request is fixed in one pass.
+
+The version comes from --version-file when that names a file. Without the flag,
+a VERSION file beside the working directory is still read; when there is none,
+the version is the last git tag (git describe --tags --abbrev=0) with any
+leading 'v' removed. The repository does not carry the version as a file.
 
 Exits 0 when the metadata is consistent, 1 when it is not, and 2 when a required
-file is missing or unreadable.
+file is missing or unreadable or the repository has no tag.
 
 Flags:
-  --version-file  path of the file holding the version (default "VERSION")
+  --version-file  path of the file holding the version; empty derives it from
+                  the last git tag (default: read VERSION when it exists)
   --changelog     path of the changelog (default "CHANGELOG.md")
   --readme        path of the README carrying the install constraint
                   (default "README.md")
@@ -504,8 +510,24 @@ Flags:
 		return exitUsage
 	}
 
+	// An explicit path is an instruction: a missing file is an error rather
+	// than a silent fallback to the tag. Only the unflagged case probes the
+	// legacy file and then derives the version.
+	explicitVersionFile := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "version-file" {
+			explicitVersionFile = true
+		}
+	})
+	versionPath := *versionFile
+	if versionPath == "" && !explicitVersionFile {
+		if _, err := os.Stat(release.DefaultVersionFile); err == nil {
+			versionPath = release.DefaultVersionFile
+		}
+	}
+
 	report, err := release.Check(release.Options{
-		VersionFile: *versionFile,
+		VersionFile: versionPath,
 		Changelog:   *changelog,
 		Readme:      *readme,
 	})
@@ -520,8 +542,13 @@ Flags:
 		return exitFailure
 	}
 
+	if report.Tag != "" {
+		_, _ = fmt.Fprintf(stdout, "release-check: %s from the last git tag (%s), %s and %s agree\n",
+			report.Version, report.Tag, *changelog, *readme)
+		return exitOK
+	}
 	_, _ = fmt.Fprintf(stdout, "release-check: %s=%s, %s and %s agree\n",
-		*versionFile, report.Version, *changelog, *readme)
+		versionPath, report.Version, *changelog, *readme)
 	return exitOK
 }
 
