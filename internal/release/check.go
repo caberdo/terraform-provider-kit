@@ -60,7 +60,7 @@ const (
 	// section. It is reported rather than failed, because the tag is not a
 	// gate input; a missing changelog entry still deserves an operator's
 	// attention.
-	StateBehind = "behind the last tag"
+	StateBehind = "the last tag is newer than the changelog"
 )
 
 // Git failure classes. They are distinct so an operator hears which of the
@@ -127,12 +127,15 @@ type Options struct {
 // file's content. Tag is the last git tag, empty when a version file supplied
 // the version or the repository has no tag. State is the reported relationship
 // between Version and Tag (StatePending, StateReleased, StateBehind or empty).
-// Problems lists every inconsistency, in the order the checks run; an empty
-// list means the metadata agrees.
+// Warnings lists git states that could not be inspected but do not decide the
+// verdict, such as a shallow clone without tags. Problems lists every
+// inconsistency, in the order the checks run; an empty list means the metadata
+// agrees.
 type Report struct {
 	Version  string
 	Tag      string
 	State    string
+	Warnings []string
 	Problems []string
 }
 
@@ -234,11 +237,36 @@ func Check(opts Options) (Report, error) {
 
 	// Without a version file the newest changelog section is the version. A
 	// changelog that holds only `## Unreleased` is a repository before its
-	// first release: there is no version and no README constraint to compare
-	// yet, which is a normal state rather than a problem. The tag is reporting
-	// only: no tag, a tag ahead of the changelog and a tag behind it all keep
-	// their verdict from this comparison.
-	report := Report{Version: released}
+	// first release — unless a tag exists, in which case the repository has
+	// released something and a changelog with no section has nothing to
+	// compare. The tag decides only that presence, never agreement: no tag, a
+	// tag ahead of the changelog and a tag behind it keep their verdict from
+	// the changelog/README comparison.
+	lastTag := opts.LastTag
+	if lastTag == nil {
+		lastTag = LastTag
+	}
+	tag, tagErr := lastTag()
+	var warnings []string
+	switch {
+	case errors.Is(tagErr, ErrNoTag):
+		tag = ""
+	case errors.Is(tagErr, ErrShallowClone):
+		// The tag is reporting only, so a checkout that cannot see tags must
+		// not fail the gate. Say so and keep the verdict.
+		warnings = append(warnings, tagErr.Error()+"; the last tag was not checked")
+		tag = ""
+	case tagErr != nil:
+		return Report{}, tagErr
+	default:
+		tag = strings.TrimSpace(tag)
+	}
+
+	report := Report{Version: released, Tag: tag, Warnings: warnings}
+	if tag != "" {
+		report.State = relationship(released, tag)
+	}
+
 	if hasRelease {
 		if !hasDatedSection(changelog, released) {
 			fail("the '%s' release section must be dated", released)
@@ -251,24 +279,9 @@ func Check(opts Options) (Report, error) {
 				fail("'%s' must install with %s", readmePath, constraint)
 			}
 		}
-	}
-
-	lastTag := opts.LastTag
-	if lastTag == nil {
-		lastTag = LastTag
-	}
-	tag, err := lastTag()
-	switch {
-	case errors.Is(err, ErrNoTag):
-		// A repository without a tag is a normal state. Say so; do not fail.
-	case err != nil:
-		return Report{}, err
-	default:
-		tag = strings.TrimSpace(tag)
-		if tag != "" {
-			report.Tag = tag
-			report.State = relationship(report.Version, tag)
-		}
+	} else if tag != "" {
+		fail("'%s' has no release section although the repository is tagged '%s'; cut a dated section for it",
+			changelogPath, tag)
 	}
 
 	report.Problems = problems

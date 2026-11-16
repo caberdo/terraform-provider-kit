@@ -87,13 +87,14 @@ func TestProviderCIScaffoldJobIsSkippedByDefault(t *testing.T) {
 	}
 }
 
-// TestProviderCIPinsATfkitWithTheNewReleaseDefault pins the version the job
-// installs. v0.9.0 predates `scaffold`; v0.11.0 predates the changelog-based
-// release check, so a provider on that pin still compares against the last tag.
-func TestProviderCIPinsATfkitWithTheNewReleaseDefault(t *testing.T) {
+// TestProviderCIPinsItsOwnRelease pins the version the job installs. A reusable
+// workflow ships inside its own tag, so the pin must name that tag: when tagging
+// vX, TFKIT_VERSION is vX. v0.12.0 shipped the inverted release check while
+// claiming the new default, which is why an older pin is not acceptable.
+func TestProviderCIPinsItsOwnRelease(t *testing.T) {
 	workflow := readProviderCI(t)
-	if got, want := workflow.Env["TFKIT_VERSION"], "v0.12.0"; got != want {
-		t.Errorf("TFKIT_VERSION = %q, want %q (the first tag with the new release default)", got, want)
+	if got, want := workflow.Env["TFKIT_VERSION"], "v0.13.0"; got != want {
+		t.Errorf("TFKIT_VERSION = %q, want %q (the release this workflow ships in)", got, want)
 	}
 }
 
@@ -142,7 +143,7 @@ func runScaffoldJob(t *testing.T, env map[string]string, tfkitExit int) (int, st
 	command.Dir = dir
 	command.Env = append(os.Environ(),
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"TFKIT_VERSION=v0.12.0",
+		"TFKIT_VERSION=v0.13.0",
 		"FAKE_ARGS="+argsFile,
 		"FAKE_EXIT="+strconv.Itoa(tfkitExit),
 		"GITHUB_STEP_SUMMARY="+summary,

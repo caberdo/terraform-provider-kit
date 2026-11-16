@@ -289,6 +289,51 @@ func TestRunReleaseCheckReleasedStateExitsZero(t *testing.T) {
 	}
 }
 
+func TestRunReleaseCheckBehindTheTagSaysWhatIsTrue(t *testing.T) {
+	// The changelog and README agree with each other; the tag is newer than
+	// the changelog. The line must not claim the repository agrees with a tag
+	// it is behind.
+	dir := releaseRepo(t, "v1.3.0", releaseChangelog, releaseReadme)
+	t.Chdir(dir)
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{"release", "check"}, testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr.String())
+	}
+	want := "release-check: 1.2.3, CHANGELOG.md and README.md agree (the last tag v1.3.0 is newer than the changelog)\n"
+	if got := stdout.String(); got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestRunReleaseCheckShallowCloneWarnsAndExitsZero(t *testing.T) {
+	// A shallow checkout has no tags; the tag is reporting only, so the gate
+	// still decides from the changelog and README.
+	source := releaseRepo(t, "v1.2.3", releasePending, releaseReadme13)
+	clone := filepath.Join(t.TempDir(), "clone")
+	cmd := exec.CommandContext(t.Context(), "git", "clone", "-q", "--depth", "1", "--no-tags", "file://"+source, clone)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git clone: %v (%s)", err, out)
+	}
+	t.Chdir(clone)
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{"release", "check"}, testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr.String())
+	}
+	if want := "warning: shallow clone"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want a warning containing %q", stderr.String(), want)
+	}
+	if want := "1.3.0, CHANGELOG.md and README.md agree (no tag yet)"; !strings.Contains(stdout.String(), want) {
+		t.Errorf("stdout = %q, want it to contain %q", stdout.String(), want)
+	}
+}
+
 func TestRunReleaseCheckChangelogReadmeDisagreementExitsOne(t *testing.T) {
 	dir := releaseRepo(t, "v1.2.3", releasePending, releaseReadme)
 	t.Chdir(dir)

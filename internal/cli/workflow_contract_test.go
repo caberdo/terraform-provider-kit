@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -103,6 +104,9 @@ func TestProviderCIChangelogJobKeepsItsExemptions(t *testing.T) {
 		".github/",
 		"docs/",
 		"examples/",
+		"scripts/",
+		"templates/",
+		"GNUmakefile",
 	} {
 		if !strings.Contains(run, want) {
 			t.Errorf("changelog job does not mention %q; the path filter and exemptions must stay", want)
@@ -126,38 +130,26 @@ func TestProviderCIChangelogJobRestoresTheConcurrencyGroup(t *testing.T) {
 	}
 }
 
-// TestSelfCITfkitGuardRequiresTheReleaseCheckDefault proves the guard checks
-// the release check's behaviour, not only that the command exists. A pin whose
-// help never mentions the tag relationship predates the changelog-based
-// default, and every provider on that pin still compares against the last tag.
-func TestSelfCITfkitGuardRequiresTheReleaseCheckDefault(t *testing.T) {
+// TestSelfCITfkitGuardRejectsV0120 proves the guard checks behaviour, not
+// wording: v0.12.0's help mentions the changelog and the last git tag, but its
+// release check still exits 1 on a release pull request. The guard must reject
+// it, naming the missing pending-release line.
+func TestSelfCITfkitGuardRejectsV0120(t *testing.T) {
 	guard := filepath.Join("..", "..", "scripts", "check-tfkit-commands.sh")
-	bin := filepath.Join(t.TempDir(), "tfkit")
-	fake := `#!/bin/sh
-if [ "$1" = "release" ] && [ "$2" = "check" ] && [ "$3" = "--help" ]; then
-  echo "usage: tfkit release check [flags]"
-  echo "  --version-file  path of the file holding the version"
-  exit 0
-fi
-cat <<'EOF'
-Commands:
-  coverage   Merge and gate coverage, render the README.
-  examples   Validate examples.
-  branch-protection  Check and set branch protection.
-  release    Check a provider's release metadata.
-  scaffold   Check the repository scaffold.
-EOF
-`
-	if err := os.WriteFile(bin, []byte(fake), 0o755); err != nil {
-		t.Fatalf("write fake tfkit: %v", err)
+	wrapper := filepath.Join(t.TempDir(), "tfkit-v0120")
+	script := "#!/bin/sh\nexec go run github.com/caberdo/terraform-provider-kit/cmd/tfkit@v0.12.0 \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		t.Fatalf("write v0.12.0 wrapper: %v", err)
 	}
 
-	output, err := exec.CommandContext(context.Background(), "bash", guard, bin, "v0.9.0").CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "bash", guard, wrapper, "v0.12.0").CombinedOutput()
 	if err == nil {
-		t.Fatalf("the guard accepted a tfkit whose release check help omits the tag (output = %q)", output)
+		t.Fatalf("the guard accepted v0.12.0, whose release check still fails a release PR (output = %q)", output)
 	}
-	if !strings.Contains(string(output), "release check --help") {
-		t.Errorf("output = %q, want it to name the release check help check", output)
+	if !strings.Contains(string(output), "pending release") {
+		t.Errorf("output = %q, want it to name the missing 'pending release' line", output)
 	}
 }
 

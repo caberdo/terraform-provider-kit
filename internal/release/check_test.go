@@ -431,6 +431,36 @@ func TestCheckTreatsAChangelogWithoutAReleaseSectionAsPreRelease(t *testing.T) {
 	}
 }
 
+func TestCheckRejectsATaggedRepositoryWithoutAReleaseSection(t *testing.T) {
+	// The repository has a tag, so it has released something. A changelog with
+	// no release section means the gate has no version to compare, and
+	// claiming agreement would pass a changelog nobody ever cut.
+	changelog := "# Changelog\n\n## Unreleased\n"
+	report := checkProbs(t, tagMetadata(t, "v0.3.0", nil, changelog, readmeInstall))
+
+	wantProblem(t, report, "no release section")
+	wantProblem(t, report, "v0.3.0")
+}
+
+func TestCheckTreatsAShallowCloneAsAWarning(t *testing.T) {
+	// The tag is reporting only, so a checkout that cannot see tags must not
+	// fail the gate: the changelog and README comparison still decided it.
+	report := checkProbs(t, tagMetadata(t, "", release.ErrShallowClone, changelogPending, readmeMinor("1.3.0")))
+
+	if len(report.Problems) != 0 {
+		t.Errorf("problems = %q, want none", report.Problems)
+	}
+	if len(report.Warnings) != 1 {
+		t.Fatalf("warnings = %q, want one shallow-clone warning", report.Warnings)
+	}
+	if !strings.Contains(report.Warnings[0], "shallow clone") {
+		t.Errorf("warning = %q, want it to name the shallow clone", report.Warnings[0])
+	}
+	if report.Tag != "" || report.State != "" {
+		t.Errorf("tag/state = %q/%q, want empty when the tag could not be read", report.Tag, report.State)
+	}
+}
+
 func TestCheckAcceptsAPrereleaseTagWithoutCrashing(t *testing.T) {
 	report := checkProbs(t, tagMetadata(t, "v1.3.0-rc1", nil, changelogPending, readmeMinor("1.3.0")))
 
@@ -575,11 +605,13 @@ func TestLastTagSelectsMatchingTags(t *testing.T) {
 }
 
 func TestCheckPropagatesAGitFailure(t *testing.T) {
-	opts := tagMetadata(t, "", release.ErrShallowClone, changelogPending, readmeMinor("1.3.0"))
+	// A state the check cannot inspect at all is still exit 2; the shallow
+	// clone is the one git failure that degrades to a warning.
+	opts := tagMetadata(t, "", release.ErrNotARepository, changelogPending, readmeMinor("1.3.0"))
 
 	_, err := release.Check(opts)
 
-	if !errors.Is(err, release.ErrShallowClone) {
-		t.Fatalf("error = %v, want ErrShallowClone", err)
+	if !errors.Is(err, release.ErrNotARepository) {
+		t.Fatalf("error = %v, want ErrNotARepository", err)
 	}
 }

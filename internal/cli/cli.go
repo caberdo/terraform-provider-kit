@@ -503,7 +503,8 @@ old contract.
 
 Exits 0 when the metadata is consistent, 1 when it is not, and 2 for a usage
 problem, a required file that is missing or unreadable, or a git state that
-cannot be inspected (not a repository, a shallow clone without tags, no git).
+cannot be inspected (not a repository, or no git binary). A shallow clone
+cannot report the tag; that is a warning, not a failure.
 
 Flags:
   --version-file  path of the file holding the version; empty derives it from
@@ -538,7 +539,7 @@ Flags:
 	if versionPath == "" && !explicitVersionFile {
 		if _, err := os.Stat(release.DefaultVersionFile); err == nil {
 			_, _ = fmt.Fprintf(stderr,
-				"release-check: refusing the legacy '%s' file: the version is the last git tag; delete it, or pass --version-file %s to keep the old contract\n",
+				"release-check: refusing the legacy '%s' file: the version is the newest CHANGELOG.md release section; delete it, or pass --version-file %s to keep the old contract\n",
 				release.DefaultVersionFile, release.DefaultVersionFile)
 			return exitUsage
 		}
@@ -561,11 +562,18 @@ Flags:
 	}
 
 	detail := "no tag yet"
-	if report.Tag != "" {
+	switch {
+	case report.Tag == "":
+	case report.State == release.StateBehind:
+		detail = "the last tag " + report.Tag + " is newer than the changelog"
+	case report.State != "":
+		detail = report.State + "; last tag " + report.Tag
+	default:
 		detail = "last tag " + report.Tag
-		if report.State != "" {
-			detail = report.State + "; " + detail
-		}
+	}
+
+	for _, warning := range report.Warnings {
+		_, _ = fmt.Fprintf(stderr, "release-check: warning: %s\n", warning)
 	}
 
 	switch {

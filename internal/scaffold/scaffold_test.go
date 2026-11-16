@@ -90,6 +90,8 @@ var enforced = []string{
 	".github/dependabot.yml",
 	".github/PULL_REQUEST_TEMPLATE.md",
 	"changelog.d/.gitkeep",
+	"CHANGELOG.md",
+	"scripts/changelog-release.sh",
 	".github/ISSUE_TEMPLATE/bug_report.md",
 	".github/ISSUE_TEMPLATE/feature_request.md",
 }
@@ -1103,6 +1105,43 @@ func TestRenderRetiresTheVersionFileAndShipsTheFragmentDirectory(t *testing.T) {
 	}
 	if _, ok := rendered["changelog.d/.gitkeep"]; !ok {
 		t.Error("rendered tree has no changelog.d/.gitkeep")
+	}
+}
+
+// TestFixDeliversWhatReleaseCheckNeeds pins that `fix` writes the changelog and
+// the assembler: a fresh repository must not pass the scaffold check and then
+// fail the release check on a file nobody delivered.
+func TestFixDeliversWhatReleaseCheckNeeds(t *testing.T) {
+	dir := t.TempDir()
+	// README.md is provider prose and not part of the enforced set; a
+	// repository has one, so give the fixture the file a provider owns.
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Provider\n"), 0o644); err != nil {
+		t.Fatalf("write README.md: %v", err)
+	}
+
+	written, err := scaffold.Fix(dir, trinoValues(), scaffold.Options{})
+	if err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	for _, want := range []string{"CHANGELOG.md", "scripts/changelog-release.sh"} {
+		if !slices.Contains(written, want) {
+			t.Errorf("Fix did not write %q (wrote %v)", want, written)
+		}
+		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(want))); err != nil {
+			t.Errorf("Fix reported %q but it is not on disk: %v", want, err)
+		}
+	}
+
+	report, err := release.Check(release.Options{
+		Changelog: filepath.Join(dir, "CHANGELOG.md"),
+		Readme:    filepath.Join(dir, "README.md"),
+		LastTag:   func() (string, error) { return "", release.ErrNoTag },
+	})
+	if err != nil {
+		t.Fatalf("release check after Fix: %v", err)
+	}
+	if len(report.Problems) != 0 {
+		t.Errorf("release check after Fix = %q, want a fresh repository to pass", report.Problems)
 	}
 }
 
