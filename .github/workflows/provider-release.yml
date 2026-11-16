@@ -1,0 +1,359 @@
+# Reusable release for the caberdo Terraform providers.
+#
+# Two jobs, both driven by the caller's triggers:
+#
+#   tag        create the signed tag (a push that changed the version file, or
+#              a workflow_dispatch) and pass it to the release job
+#   goreleaser build, attest, SBOM and publish the release
+#
+# The caller keeps `on: push: branches: [main]`, `on: push: tags: ["v*"]` and
+# `on: workflow_dispatch` (including the `version`, `release_type` and `tag`
+# inputs it forwards), plus the `create-release-tag` concurrency group.
+#
+# A `paths: [VERSION]` trigger filter cannot be combined reliably with a
+# `tags: ["v*"]` trigger in one `push:` block, so the filter is a job guard that
+# compares the pushed range against the version file: it sees a multi-commit
+# push, which `HEAD^..HEAD` would miss.
+#
+# The caller must grant `contents: write`, `id-token: write` and
+# `attestations: write`, and must pass the signing secrets (`secrets: inherit`
+# is enough).
+name: Provider Release
+
+on:
+  workflow_call:
+    inputs:
+      provider:
+        description: "Provider name without the caberdo/ prefix; derives dist-prefix when that is empty"
+        required: true
+        type: string
+      dist-prefix:
+        description: "GoReleaser project name in dist/ (terraform-provider-<provider>); empty derives it from provider"
+        required: false
+        type: string
+        default: ""
+      goreleaser-config:
+        description: "Path of the GoReleaser configuration"
+        required: false
+        type: string
+        default: ".github/goreleaser.yml"
+      version-file:
+        description: "File whose change triggers a tag; empty means dispatch or tag pushes only"
+        required: false
+        type: string
+        default: "VERSION"
+      changelog-path:
+        description: "Path of the changelog the tag job checks for a dated section"
+        required: false
+        type: string
+        default: "CHANGELOG.md"
+      changelog-check:
+        description: "Refuse to tag a version the changelog does not document"
+        required: false
+        type: boolean
+        default: false
+      tag-exists:
+        description: "What a tag that already points at this commit means: skip (re-run) or fail"
+        required: false
+        type: string
+        default: "fail"
+      tag:
+        description: "Existing tag to publish or republish (the caller's workflow_dispatch input)"
+        required: false
+        type: string
+        default: ""
+      version:
+        description: "Version to release (the caller's workflow_dispatch input); empty derives one"
+        required: false
+        type: string
+        default: ""
+      release-type:
+        description: "patch, minor or major; used when version is empty"
+        required: false
+        type: string
+        default: "patch"
+    secrets:
+      GPG_PRIVATE_KEY:
+        description: "Armoured GPG private key the tag and the release are signed with"
+        required: true
+      PASSPHRASE:
+        description: "Passphrase of GPG_PRIVATE_KEY"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    name: Tag the release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      # A tag pushed from a maintainer machine must reach goreleaser without a
+      # second run of this job; tagpush supplies it.
+      tag: ${{ steps.tagpush.outputs.tag || steps.tagcheck.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Tag pushed by a maintainer
+        id: tagpush
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        run: |
+          echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          echo "An existing tag was pushed; nothing to create." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Was the version file changed by this push?
+        id: drain
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && inputs.version-file != ''
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event.before }}" =~ ^0+$ ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"      # new branch: treat as changed
+            exit 0
+          fi
+          if git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" -- ${{ inputs.version-file }} | grep -q .; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve the version
+        id: version
+        if: inputs.tag == '' && (github.event_name == 'workflow_dispatch' || steps.drain.outputs.run == 'true') && steps.tagpush.outputs.tag == ''
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+          DISPATCH_TYPE: ${{ inputs.release-type }}
+        run: |
+          set -euo pipefail
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Latest tag: $LATEST_TAG"
+          LATEST_VERSION=${LATEST_TAG#v}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_VERSION"
+
+          if [[ -n "$DISPATCH_VERSION" ]]; then
+            NEW_VERSION="$DISPATCH_VERSION"
+            SOURCE="the workflow_dispatch version input"
+          elif [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            NEW_VERSION=$(tr -d '[:space:]' < ${{ inputs.version-file }})
+            SOURCE="${{ inputs.version-file }}"
+          else
+            case "$DISPATCH_TYPE" in
+              major) NEW_VERSION="$((MAJOR + 1)).0.0" ;;
+              minor) NEW_VERSION="${MAJOR}.$((MINOR + 1)).0" ;;
+              patch) NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
+              *)
+                echo "Error: unknown release_type '$DISPATCH_TYPE'" >&2
+                exit 1
+                ;;
+            esac
+            SOURCE="a $DISPATCH_TYPE bump of $LATEST_TAG"
+          fi
+
+          if [[ ! "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: the version from $SOURCE is '$NEW_VERSION'; expected X.Y.Z without a leading v" >&2
+            exit 1
+          fi
+
+          {
+            echo "latest=$LATEST_TAG"
+            echo "version=$NEW_VERSION"
+            echo "tag=v$NEW_VERSION"
+            echo "source=$SOURCE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved $NEW_VERSION from $SOURCE"
+
+      # A re-run, or a dispatch for an already released version, must not fail:
+      # an existing tag on this commit means the release already happened. A tag
+      # on another commit means the version was reused, which is an error
+      # because a published tag must not move.
+      - name: Check the tag does not exist yet
+        id: tagcheck
+        if: steps.version.outputs.tag != ''
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            EXISTING=$(git rev-parse "${TAG}^{commit}")
+            if [[ "$EXISTING" == "$GITHUB_SHA" && "${{ inputs.tag-exists }}" == "skip" ]]; then
+              echo "Tag $TAG already points at $GITHUB_SHA; nothing to create."
+              {
+                echo "tag="
+                echo "skip=true"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Error: tag $TAG already exists on $EXISTING, not on $GITHUB_SHA." >&2
+            echo "Change the version file to release a new version, or republish $TAG" >&2
+            echo "through the release workflow." >&2
+            exit 1
+          fi
+          {
+            echo "tag=$TAG"
+            echo "skip=false"
+          } >> "$GITHUB_OUTPUT"
+
+      # The changelog is the only place a release is documented. Refuse to ship
+      # a version nobody wrote down, rather than publishing an undocumented one.
+      - name: Check the changelog documents the version
+        if: inputs.changelog-check && steps.version.outputs.tag != '' && steps.tagcheck.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CHANGELOG: ${{ inputs.changelog-path }}
+        run: |
+          set -euo pipefail
+          if ! grep -Eq "^## \[${VERSION//./\\.}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" "$CHANGELOG"; then
+            echo "Error: $CHANGELOG has no dated '## [$VERSION]' section." >&2
+            echo "Cut the Unreleased entries into that section before releasing." >&2
+            exit 1
+          fi
+
+      - name: Import GPG key
+        id: import_gpg
+        if: steps.version.outputs.tag != '' && steps.tagcheck.outputs.skip != 'true'
+        uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.PASSPHRASE }}
+          git_user_signingkey: true
+          git_tag_gpgsign: true
+
+      - name: Create and push signed tag
+        if: steps.version.outputs.tag != '' && steps.tagcheck.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # GitHub maps the tagger email to an account and looks the signature
+          # up in that account's registered keys, so use the signing identity.
+          git config user.name "${{ steps.import_gpg.outputs.name }}"
+          git config user.email "${{ steps.import_gpg.outputs.email }}"
+          git tag -s "$TAG" -m "Release $TAG"
+          git tag -v "$TAG"
+          git push origin "$TAG"
+
+      - name: Summary
+        if: steps.version.outputs.tag != ''
+        env:
+          TAG: ${{ steps.tagcheck.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          LATEST: ${{ steps.version.outputs.latest }}
+          SOURCE: ${{ steps.version.outputs.source }}
+        run: |
+          if [[ -z "$TAG" ]]; then
+            {
+              echo "## Release tag already exists"
+              echo ""
+              echo "Tag **v$VERSION** already points at \`$GITHUB_SHA\`, so this run created and published nothing."
+              echo "To republish its assets, dispatch the release workflow with \`tag=v$VERSION\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## Release Tag Created"
+            echo "| Previous | **$LATEST** |"
+            echo "| New Tag  | **$TAG** |"
+            echo "| Version from | $SOURCE |"
+            echo "| Commit   | **$GITHUB_SHA** |"
+            echo "| Signed by | **${{ steps.import_gpg.outputs.fingerprint }}** |"
+            echo ""
+            echo "The release job builds and publishes the provider next."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  goreleaser:
+    name: GoReleaser
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: tag
+    # A skipped tag (no version change, or an already released version)
+    # publishes nothing.
+    if: inputs.tag != '' || needs.tag.outputs.tag != ''
+    # `contents: write` uploads the release. `id-token: write` mints the OIDC
+    # identity `actions/attest` signs the provenance with, and
+    # `attestations: write` stores that provenance in the repository record.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || needs.tag.outputs.tag || github.ref_name }}
+      DIST_PREFIX: ${{ inputs.dist-prefix != '' && inputs.dist-prefix || format('terraform-provider-{0}', inputs.provider) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: Import GPG key
+        id: import_gpg
+        uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.PASSPHRASE }}
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: "~> v2"
+          args: release --clean --config ${{ inputs.goreleaser-config }}
+        env:
+          GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ env.RELEASE_TAG }}
+
+      # GoReleaser names the checksum file after the version without the `v`
+      # prefix, which is also the version the tag is checked out at.
+      - name: Resolve the release artifact names
+        id: artifacts
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          echo "checksums=dist/${DIST_PREFIX}_${VERSION}_SHA256SUMS" >> "$GITHUB_OUTPUT"
+          echo "provenance=${DIST_PREFIX}_${VERSION}_provenance.intoto.jsonl" >> "$GITHUB_OUTPUT"
+
+      # The checksum file lists exactly the artifacts the release publishes, so
+      # attesting it attests the same set the GPG signature, the SBOM and the
+      # Terraform Registry manifest describe.
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: ${{ steps.artifacts.outputs.checksums }}
+
+      # The attestation record is not a release asset and OpenSSF Scorecard's
+      # Signed-Releases check reads release assets, so the Sigstore bundle that
+      # `actions/attest` just produced is attached to the release as well.
+      - name: Publish the provenance bundle
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          PROVENANCE: ${{ steps.artifacts.outputs.provenance }}
+        run: |
+          set -euo pipefail
+          cp "${BUNDLE_PATH}" "${PROVENANCE}"
+          test -s "${PROVENANCE}"
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: ./dist
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Upload the SBOM and the provenance to release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          files: |
+            sbom.spdx.json
+            ${{ steps.artifacts.outputs.provenance }}
+          tag_name: ${{ env.RELEASE_TAG }}

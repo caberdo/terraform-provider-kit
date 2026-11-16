@@ -1,0 +1,139 @@
+# Reusable version-matrix freshness check for the caberdo Terraform providers.
+#
+# Compares the supported-versions file with the newest stable upstream releases
+# and opens (or updates) exactly one issue when the matrix lags. It never edits
+# the matrix itself: a human or an agent lands the bump pull request.
+#
+# The caller owns the triggers (`schedule` and `workflow_dispatch`) and must
+# grant `issues: write`.
+name: Provider Version Freshness
+
+on:
+  workflow_call:
+    inputs:
+      provider-display:
+        description: "Display casing of the provider (Trino, Gravitino, agentgateway, OpenMetadata, RustFS)"
+        required: true
+        type: string
+      versions-file:
+        description: "Path of the supported-versions file, ordered ascending"
+        required: true
+        type: string
+      upstream:
+        description: "Upstream repository whose releases define the window (owner/name)"
+        required: true
+        type: string
+      strip-v:
+        description: "Strip a leading 'v' from upstream tags before comparing (trino)"
+        required: false
+        type: boolean
+        default: false
+      window:
+        description: "Number of newest stable releases the matrix must cover"
+        required: false
+        type: number
+        default: 5
+      issue-label:
+        description: "Label of the freshness issue"
+        required: false
+        type: string
+        default: "version-matrix"
+
+permissions:
+  contents: read
+
+jobs:
+  freshness:
+    name: Check the ${{ inputs.provider-display }} release window
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Read-only until the comparison finishes: the workflow never edits the
+      # matrix. Comments and whitespace are stripped, so a file without them
+      # (trino) parses exactly as before.
+      - name: Compare the matrix with the last stable releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          current=$(sed -e 's/#.*//' -e 's/[[:space:]]//g' ${{ inputs.versions-file }} | grep -v '^$')
+          floor=$(printf '%s\n' "$current" | head -n 1)
+
+          # Newest first from the API; keep non-prerelease tags, take `window`.
+          # --slurp is required: without it, --paginate emits one JSON array per
+          # page and jq would take the window from *each* page.
+          releases=$(gh api "repos/${{ inputs.upstream }}/releases?per_page=100" --paginate --slurp)
+          window=$(printf '%s' "$releases" \
+            | jq -r \
+                --argjson window ${{ inputs.window }} \
+                --argjson strip ${{ inputs.strip-v && 1 || 0 }} \
+                'add | map(select(.prerelease == false)) | .[0:$window] | .[]
+                 | [(if $strip == 1 then (.tag_name | sub("^v"; "")) else .tag_name end),
+                    (.published_at[0:10])] | @tsv')
+          if [[ -z "$window" ]]; then
+            echo "the GitHub releases API returned no stable ${{ inputs.provider-display }} releases" >&2
+            exit 1
+          fi
+
+          latest=$(printf '%s\n' "$window" | cut -f1 | sort -V)
+          expected=$( { printf '%s\n' "$floor"; printf '%s\n' "$latest"; } | sort -V -u)
+          detail=$(printf '%s\n' "$window" | awk -F'\t' '{ printf "- %s released %s\n", $1, $2 }')
+
+          if diff -u <(printf '%s\n' "$current") <(printf '%s\n' "$expected") >/dev/null; then
+            echo "The matrix already covers the last stable releases."
+            exit 0
+          fi
+
+          echo "The matrix is stale:"
+          diff -u <(printf '%s\n' "$current") <(printf '%s\n' "$expected") || true
+
+          body=$(mktemp)
+          {
+            echo "The acceptance matrix in \`${{ inputs.versions-file }}\` no longer matches the last stable ${{ inputs.provider-display }} releases."
+            echo
+            echo "**Current**"
+            echo '```'
+            printf '%s\n' "$current"
+            echo '```'
+            echo
+            echo "**Expected** (floor \`$floor\` plus the last stable releases, ascending)"
+            echo '```'
+            printf '%s\n' "$expected"
+            echo '```'
+            echo
+            echo "**Releases**"
+            printf '%s\n' "$detail"
+            echo
+            echo "Update the file, run \`make testacc-matrix\`, and land a PR. This workflow never edits the matrix itself."
+          } > "$body"
+
+          gh label create ${{ inputs.issue-label }} \
+            --description "${{ inputs.provider-display }} version matrix" \
+            --color 0e8a16 2>/dev/null || true
+
+          existing=$(gh issue list \
+            --repo "$REPO" \
+            --label ${{ inputs.issue-label }} \
+            --state open \
+            --search '${{ inputs.provider-display }} version matrix is stale in:title' \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [[ -n "$existing" ]]; then
+            gh issue edit "$existing" --repo "$REPO" --body-file "$body"
+            echo "Updated issue #$existing."
+          else
+            gh issue create \
+              --repo "$REPO" \
+              --title "${{ inputs.provider-display }} version matrix is stale" \
+              --label ${{ inputs.issue-label }} \
+              --body-file "$body"
+          fi
