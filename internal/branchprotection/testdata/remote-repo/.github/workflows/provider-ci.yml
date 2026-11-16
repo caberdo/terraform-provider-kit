@@ -1,0 +1,17 @@
+name: Provider CI
+
+on:
+  workflow_call:
+
+jobs:
+  lint:
+    name: Lint & Security
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo lint
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo test

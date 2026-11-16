@@ -1,0 +1,12 @@
+name: Publish
+
+on:
+  pull_request:
+
+jobs:
+  deploy:
+    name: Deploy
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo deploy

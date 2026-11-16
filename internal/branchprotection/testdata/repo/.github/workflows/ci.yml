@@ -1,0 +1,16 @@
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint & Security
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo test
