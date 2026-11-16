@@ -734,14 +734,24 @@ Flags:
 		_, _ = fmt.Fprintf(stderr, "coverage-readme: %v\n", err)
 		return exitUsage
 	}
-	baseline, err := readBaselineFile(*baselinePath)
+	baselineData, err := readBaselineData(*baselinePath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "coverage-readme: %v\n", err)
 		return exitUsage
 	}
 
+	// The baseline file decides the rendering, exactly as it decides the gate:
+	// `floor_` keys mean the key=value scope dialect, with its measured badge and
+	// per-scope bar table; anything else is the bare-percentage floor block. A
+	// flag would let a provider render the wrong shape by forgetting it.
+	block, err := readmeBlocks(doc, baselineData, *gateCommand)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-readme: %s: %v\n", *baselinePath, err)
+		return exitUsage
+	}
+
 	if *check {
-		if err := coverage.CheckReadme(doc, baseline, *gateCommand); err != nil {
+		if err := block.check(); err != nil {
 			if errors.Is(err, coverage.ErrReadmeStale) {
 				_, _ = fmt.Fprintf(stderr, "coverage-readme: '%s' is out of date with '%s'\n", *readmePath, *baselinePath)
 				_, _ = io.WriteString(stderr, "Run 'make coverage-readme' and commit the result.\n")
@@ -754,7 +764,7 @@ Flags:
 		return exitOK
 	}
 
-	rendered, err := coverage.RenderReadme(doc, baseline, *gateCommand)
+	rendered, err := block.render()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "coverage-readme: '%s': %v\n", *readmePath, err)
 		return exitUsage
@@ -772,6 +782,40 @@ Flags:
 
 	_, _ = fmt.Fprintf(stdout, "coverage-readme: updated '%s' from '%s'\n", *readmePath, *baselinePath)
 	return exitOK
+}
+
+// readmeBlock is one dialect's renderer: the rewrite and the drift check, so the
+// caller never compares bytes itself and a check can never write.
+type readmeBlock struct {
+	render func() ([]byte, error)
+	check  func() error
+}
+
+// readmeBlocks chooses the block shape and parses the baseline for it, once, so
+// a configuration error is reported before anything is written. A baseline with
+// `floor_` keys is the key=value scope dialect, whose floors live in the same
+// file; everything else is the bare-percentage floor block, which ignores the
+// scope fields.
+func readmeBlocks(doc, baselineData []byte, gateCommand string) (readmeBlock, error) {
+	if coverage.ScopeDialect(baselineData) {
+		baseline, err := coverage.ParseScopeBaseline(bytes.NewReader(baselineData))
+		if err != nil {
+			return readmeBlock{}, err
+		}
+		return readmeBlock{
+			render: func() ([]byte, error) { return coverage.RenderScopeReadme(doc, baseline) },
+			check:  func() error { return coverage.CheckScopeReadme(doc, baseline) },
+		}, nil
+	}
+
+	baseline, err := coverage.ReadBaseline(bytes.NewReader(baselineData))
+	if err != nil {
+		return readmeBlock{}, err
+	}
+	return readmeBlock{
+		render: func() ([]byte, error) { return coverage.RenderReadme(doc, baseline, gateCommand) },
+		check:  func() error { return coverage.CheckReadme(doc, baseline, gateCommand) },
+	}, nil
 }
 
 // readReadmeFile reads the README at path and returns its permissions, so a
@@ -849,20 +893,6 @@ func readBaselineData(path string) ([]byte, error) {
 		return nil, err
 	}
 	return data, nil
-}
-
-// readBaselineFile reads the bare-percentage baseline at path.
-func readBaselineFile(path string) (float64, error) {
-	data, err := readBaselineData(path)
-	if err != nil {
-		return 0, err
-	}
-
-	baseline, err := coverage.ReadBaseline(bytes.NewReader(data))
-	if err != nil {
-		return 0, fmt.Errorf("%s: %w", path, err)
-	}
-	return baseline, nil
 }
 
 // readFloorsFile reads the per-package floors at path. A missing file is not an

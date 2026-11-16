@@ -92,20 +92,25 @@ func splitReadmeLines(doc []byte) []string {
 }
 
 // findReadmeMarkers returns the indexes of the single start and end marker.
-// A pair that is missing, duplicated or reversed is an error: swapping a
-// reversed pair would delete the text between the markers.
 func findReadmeMarkers(lines []string) (int, int, error) {
+	return findMarkerPair(lines, readmeStartMarker, readmeEndMarker)
+}
+
+// findMarkerPair returns the indexes of the single start and end marker of one
+// pair. A pair that is missing, duplicated or reversed is an error: swapping a
+// reversed pair would delete the text between the markers.
+func findMarkerPair(lines []string, startMarker, endMarker string) (int, int, error) {
 	starts, ends := -1, -1
 	for i, line := range lines {
 		switch line {
-		case readmeStartMarker:
+		case startMarker:
 			if starts >= 0 {
-				return 0, 0, fmt.Errorf("%w: found more than one %q", ErrReadmeMarkers, readmeStartMarker)
+				return 0, 0, fmt.Errorf("%w: found more than one %q", ErrReadmeMarkers, startMarker)
 			}
 			starts = i
-		case readmeEndMarker:
+		case endMarker:
 			if ends >= 0 {
-				return 0, 0, fmt.Errorf("%w: found more than one %q", ErrReadmeMarkers, readmeEndMarker)
+				return 0, 0, fmt.Errorf("%w: found more than one %q", ErrReadmeMarkers, endMarker)
 			}
 			ends = i
 		}
@@ -113,13 +118,13 @@ func findReadmeMarkers(lines []string) (int, int, error) {
 
 	switch {
 	case starts < 0 && ends < 0:
-		return 0, 0, fmt.Errorf("%w: found neither %q nor %q", ErrReadmeMarkers, readmeStartMarker, readmeEndMarker)
+		return 0, 0, fmt.Errorf("%w: found neither %q nor %q", ErrReadmeMarkers, startMarker, endMarker)
 	case starts < 0:
-		return 0, 0, fmt.Errorf("%w: found %q but no %q", ErrReadmeMarkers, readmeEndMarker, readmeStartMarker)
+		return 0, 0, fmt.Errorf("%w: found %q but no %q", ErrReadmeMarkers, endMarker, startMarker)
 	case ends < 0:
-		return 0, 0, fmt.Errorf("%w: found %q but no %q", ErrReadmeMarkers, readmeStartMarker, readmeEndMarker)
+		return 0, 0, fmt.Errorf("%w: found %q but no %q", ErrReadmeMarkers, startMarker, endMarker)
 	case starts > ends:
-		return 0, 0, fmt.Errorf("%w: %q appears after %q", ErrReadmeMarkers, readmeStartMarker, readmeEndMarker)
+		return 0, 0, fmt.Errorf("%w: %q appears after %q", ErrReadmeMarkers, startMarker, endMarker)
 	}
 
 	return starts, ends, nil

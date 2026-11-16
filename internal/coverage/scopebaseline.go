@@ -34,6 +34,9 @@ type ScopeBaseline struct {
 	// floorText keeps each floor token as written, because the scripts echo
 	// the token (`79.0`, not `79`) into the table.
 	floorText map[string]string
+	// measuredText keeps each measurement token as written, for the same
+	// reason: rustfs publishes `provider … 88.0%`, not `88%`.
+	measuredText map[string]string
 	// targetText and goldText keep the milestone tokens as written, and
 	// hasTarget/hasGold record whether the file named them at all.
 	targetText string
@@ -62,9 +65,10 @@ type ScopeBaseline struct {
 // below `gold`, or the milestone sentence would read backwards.
 func ParseScopeBaseline(r io.Reader) (ScopeBaseline, error) {
 	baseline := ScopeBaseline{
-		Measured:  map[string]float64{},
-		Floors:    map[string]float64{},
-		floorText: map[string]string{},
+		Measured:     map[string]float64{},
+		Floors:       map[string]float64{},
+		floorText:    map[string]string{},
+		measuredText: map[string]string{},
 	}
 	seen := map[string]bool{}
 
@@ -124,6 +128,7 @@ func ParseScopeBaseline(r io.Reader) (ScopeBaseline, error) {
 					return ScopeBaseline{}, fmt.Errorf("line %d: %w", lineNo, err)
 				}
 				baseline.Measured[scope] = percentage
+				baseline.measuredText[scope] = value
 				baseline.order = append(baseline.order, scope)
 			case strings.HasPrefix(key, "floor_"):
 				scope := strings.TrimPrefix(key, "floor_")
