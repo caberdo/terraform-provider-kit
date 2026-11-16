@@ -1,0 +1,43 @@
+# Verifies that the default branch's ruleset still requires the checks that the
+# workflows actually report. Runs weekly and on demand. It opens one issue
+# labelled `ci` on drift and closes it again when the ruleset is back in sync.
+#
+# The check itself is the reusable workflow in caberdo/terraform-provider-kit.
+# Reading a repository ruleset needs administration permission, which the
+# default GITHUB_TOKEN does not have. Set the BRANCH_PROTECTION_TOKEN secret to
+# a fine-grained token with "Administration: read" on this repository (or a
+# classic token with `repo`) for this workflow to do real work. Without it the
+# check no-ops with a warning instead of failing forever.
+name: Branch Protection Drift
+
+on:
+  schedule:
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    uses: caberdo/terraform-provider-kit/.github/workflows/provider-protection.yml@{{KIT_VERSION}}
+    # `issues: write` opens, updates and closes the single drift issue.
+    permissions:
+      contents: read
+      issues: write
+    # The called workflow reads one optional secret; an explicit mapping keeps
+    # the rest of the repository's secrets out of it.
+    secrets:
+      BRANCH_PROTECTION_TOKEN: ${{ secrets.BRANCH_PROTECTION_TOKEN }}
+    with:
+      ruleset-name: main-protection
+      # The status-check contexts the ruleset requires, spelled as the caller
+      # job id and the called job's name produce them. tfkit otherwise falls
+      # back to its pre-migration default ("Lint & Security,Test"), which no job
+      # in this repository reports, so every weekly run would look like drift.
+      required-contexts: "ci / Lint & Security,ci / Test"

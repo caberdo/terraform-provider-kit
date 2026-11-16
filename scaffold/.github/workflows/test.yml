@@ -1,0 +1,81 @@
+# CI is delegated to the reusable workflows in caberdo/terraform-provider-kit.
+#
+# The triggers, the concurrency group and the token scopes stay here: a
+# `workflow_call` file cannot declare triggers, and a called workflow can only
+# narrow the token its caller grants. Everything else — the job steps, the
+# versions-matrix parser, the coverage gate — lives in the kit.
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    uses: caberdo/terraform-provider-kit/.github/workflows/provider-ci.yml@{{KIT_VERSION}}
+    # GitHub validates a caller's grant against every job of the called workflow
+    # before any `if:` or input is evaluated, so these are the union of what
+    # provider-ci declares, not what this run happens to execute:
+    #
+    # - `contents: write` + `pull-requests: write`: requested unconditionally by
+    #   the called `docs` job. Omitting them rejects the whole run even when
+    #   `docs-mode: none` means that job only explains itself.
+    # - `security-events: write`: the `Lint & Security` job uploads gosec SARIF
+    #   to code scanning.
+    #
+    # This does not widen the token any other job runs with: every other job in
+    # provider-ci.yml re-declares `contents: read` (and nothing else), and a
+    # called job can narrow the caller's grant, never widen it.
+    permissions:
+      contents: write
+      pull-requests: write
+      security-events: write
+    with:
+      provider: {{PROVIDER}}
+      provider-display: {{PRODUCT}}
+      module: {{MODULE}}
+      # The matrix source of truth, named here so it cannot drift from the
+      # acceptance call below.
+      versions-file: {{VERSIONS_FILE}}
+      packages: {{PACKAGES}}
+      # A release pull request is the only change that moves VERSION: the
+      # changelog check catches a mismatch before the merge instead of after it.
+      changelog: true
+      # The generated docs must not drift; `docs-mode: none` keeps the check in
+      # the Test job.
+      docs: true
+      # Re-check the coverage sentence in README.md from the Test job.
+      coverage-readme-in-test: true
+
+  # A caller cannot express `needs.<job>.result` across a reusable-workflow
+  # boundary, so `needs: ci` is the only faithful spelling: a failing or skipped
+  # `ci` skips acceptance.
+  acceptance:
+    needs: ci
+    uses: caberdo/terraform-provider-kit/.github/workflows/provider-acceptance.yml@{{KIT_VERSION}}
+    permissions:
+      contents: read
+    with:
+      provider: {{PROVIDER}}
+      provider-display: {{PRODUCT}}
+      packages: {{PACKAGES}}
+      versions-file: {{VERSIONS_FILE}}
+      version-env: {{VERSION_ENV}}
+      expect-version-env: {{EXPECT_VERSION_ENV}}
+      # One compose project per version so matrices cannot share containers,
+      # volumes or port bindings.
+      compose-project-prefix: {{PROVIDER}}
+      # Two servers at a time keeps memory bounded on the standard runner while
+      # still letting the matrix finish in a few waves.
+      max-parallel: 2
+      acceptance-timeout: 45
