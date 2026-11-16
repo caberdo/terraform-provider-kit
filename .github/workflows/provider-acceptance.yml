@@ -107,7 +107,10 @@ permissions:
   contents: read
 
 env:
-  TFKIT: go run github.com/caberdo/terraform-provider-kit/cmd/tfkit@v0.3.0
+  # `go run` rewrites a child's non-zero status to 1, so tfkit's exit codes
+  # would be lost. The job installs the tool once and calls the binary.
+  TFKIT_VERSION: v0.3.0
+  TFKIT: tfkit
 
 jobs:
   prepare:
@@ -208,6 +211,12 @@ jobs:
         with:
           go-version-file: "go.mod"
           cache: true
+
+      - name: Install tfkit
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/caberdo/terraform-provider-kit/cmd/tfkit@${{ env.TFKIT_VERSION }}
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       # The acceptance container writes coverage-acceptance.out into the mounted
       # worktree; the unit profile is produced here so both can be merged into

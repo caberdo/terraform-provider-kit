@@ -260,7 +260,11 @@ permissions:
   contents: read
 
 env:
-  TFKIT: go run github.com/caberdo/terraform-provider-kit/cmd/tfkit@v0.3.0
+  # `go run` rewrites a child's non-zero status to 1, so tfkit's exit codes
+  # (2 configuration, 3 unreadable) would be lost. Each job installs the tool
+  # once and calls the binary, whose status passes through unchanged.
+  TFKIT_VERSION: v0.3.0
+  TFKIT: tfkit
 
 jobs:
   lint:
@@ -462,6 +466,12 @@ jobs:
           go-version-file: "go.mod"
           cache: true
 
+      - name: Install tfkit
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/caberdo/terraform-provider-kit/cmd/tfkit@${{ env.TFKIT_VERSION }}
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
       # gravitino's module path is outside the caberdo organisation, so a
       # caller that copies another provider's configuration verbatim would
       # otherwise "pass" while tfkit resolved the wrong module.
@@ -588,6 +598,12 @@ jobs:
         with:
           go-version-file: "go.mod"
           cache: true
+
+      - name: Install tfkit
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/caberdo/terraform-provider-kit/cmd/tfkit@${{ env.TFKIT_VERSION }}
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       # README's badge and coverage block are generated from the same baseline
       # the gate enforces, so a dropped floor or a stale README fails here.

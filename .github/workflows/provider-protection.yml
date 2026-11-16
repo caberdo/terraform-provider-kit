@@ -51,7 +51,11 @@ permissions:
   contents: read
 
 env:
-  TFKIT: go run github.com/caberdo/terraform-provider-kit/cmd/tfkit@v0.3.0
+  # `go run` rewrites a child's non-zero status to 1, which would turn tfkit's
+  # exit 2 (configuration) and 3 (unreadable ruleset) into the drift status 1.
+  # Install once and call the binary so the status reaches the branches below.
+  TFKIT_VERSION: v0.3.0
+  TFKIT: tfkit
 
 jobs:
   drift:
@@ -68,6 +72,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: Install tfkit
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/caberdo/terraform-provider-kit/cmd/tfkit@${{ env.TFKIT_VERSION }}
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Check branch protection
         id: check
@@ -111,15 +127,23 @@ jobs:
 
       - name: Open or update the drift issue
         if: steps.check.outputs.code == '1'
+        env:
+          REQUIRED_CONTEXTS_INPUT: ${{ inputs.required-contexts }}
         run: |
+          # Suggest the same --contexts the check ran with, so a local run
+          # reproduces the CI verdict instead of the pre-migration default.
+          contexts=""
+          if [ -n "$REQUIRED_CONTEXTS_INPUT" ]; then
+            contexts=" --contexts \"$REQUIRED_CONTEXTS_INPUT\""
+          fi
           title="Branch protection drift detected"
           body="$(mktemp)"
           {
             echo "The \`${{ inputs.ruleset-name }}\` ruleset no longer matches the policy"
             echo "\`tfkit branch-protection check\` enforces."
             echo ""
-            echo "Run \`tfkit branch-protection check --ruleset ${{ inputs.ruleset-name }}\` locally,"
-            echo "fix the drift with \`tfkit branch-protection setup --ruleset ${{ inputs.ruleset-name }}\`,"
+            echo "Run \`tfkit branch-protection check --ruleset ${{ inputs.ruleset-name }}${contexts}\` locally,"
+            echo "fix the drift with \`tfkit branch-protection setup --ruleset ${{ inputs.ruleset-name }}${contexts}\`,"
             echo "and close this issue."
             echo ""
             echo '```'
