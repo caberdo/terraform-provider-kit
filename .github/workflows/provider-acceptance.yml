@@ -111,6 +111,7 @@ env:
   # would be lost. The job installs the tool once and calls the binary.
   TFKIT_VERSION: v0.3.0
   TFKIT: tfkit
+  GOTOOLCHAIN: auto
 
 jobs:
   prepare:

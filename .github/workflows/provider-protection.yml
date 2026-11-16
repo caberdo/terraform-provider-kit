@@ -54,8 +54,10 @@ env:
   # `go run` rewrites a child's non-zero status to 1, which would turn tfkit's
   # exit 2 (configuration) and 3 (unreadable ruleset) into the drift status 1.
   # Install once and call the binary so the status reaches the branches below.
+  # GOTOOLCHAIN=auto lets a caller with an older Go still build the kit.
   TFKIT_VERSION: v0.3.0
   TFKIT: tfkit
+  GOTOOLCHAIN: auto
 
 jobs:
   drift:
@@ -76,8 +78,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: "go.mod"
-          cache: true
+          # This job only needs a Go binary to install tfkit; it never builds
+          # the provider, so it must not depend on the caller's go.mod or go.sum.
+          go-version: stable
+          cache: false
 
       - name: Install tfkit
         run: |

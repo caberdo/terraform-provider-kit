@@ -265,6 +265,7 @@ env:
   # once and calls the binary, whose status passes through unchanged.
   TFKIT_VERSION: v0.3.0
   TFKIT: tfkit
+  GOTOOLCHAIN: auto
 
 jobs:
   lint:

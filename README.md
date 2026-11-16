@@ -46,6 +46,8 @@ exists to catch.
 go run github.com/caberdo/terraform-provider-kit/cmd/tfkit@v0.3.0 --help
 ```
 
+`go run` is fine for interactive use, but it flattens tfkit's exit codes (a child 2 or 3 becomes 1), so CI and the drift check invoke the installed binary instead.
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).
