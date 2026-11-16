@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -48,6 +49,8 @@ func runScaffold(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "check":
 		return runScaffoldCheck(args[1:], stdout, stderr)
+	case "fix":
+		return runScaffoldFix(args[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown scaffold command %q\n\n", args[0])
 		_, _ = io.WriteString(stderr, scaffoldUsage)
@@ -68,61 +71,164 @@ func (v *allowValues) String() string {
 	return strings.Join(parts, ",")
 }
 
-// Set parses one <path>:<reason> pair.
+// Set parses one <path>:<reason> pair. The same parser reads the per-repository
+// allow-list file, so the two spellings cannot drift apart.
 func (v *allowValues) Set(value string) error {
-	path, reason, ok := strings.Cut(value, ":")
-	if !ok || strings.TrimSpace(path) == "" || strings.TrimSpace(reason) == "" {
-		return fmt.Errorf("want <path>:<reason>, got %q", value)
+	entry, err := parseAllowance(value)
+	if err != nil {
+		return err
 	}
-	*v = append(*v, scaffold.Allowance{
-		Path:   strings.TrimSpace(path),
-		Reason: strings.TrimSpace(reason),
-	})
+	*v = append(*v, entry)
 	return nil
 }
 
-// runScaffoldCheck implements `tfkit scaffold check`. It only parses arguments
-// and derives the values the repository supplies; rendering and comparing
-// belong to the scaffold package. Exit codes: 0 when the repository matches,
-// 1 on drift (with every differing or missing file named) and 2 for a usage or
-// configuration problem.
-func runScaffoldCheck(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("tfkit scaffold check", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	provider := flags.String("provider", "",
-		"provider name without the terraform-provider- prefix (default: the directory name)")
-	product := flags.String("product", "", "product display name, such as Trino (required)")
-	module := flags.String("module", "", "Go module path (default: the module line of go.mod)")
-	year := flags.String("year", "", "copyright year in LICENSE (required)")
-	copyright := flags.String("copyright", "", "copyright holder in LICENSE (required)")
-	kitVersion := flags.String("kit-version", "",
-		"kit release tag or full commit SHA the workflow callers pin (required)")
-	packages := flags.String("packages", "",
-		"go list pattern the tests and coverage gate use (default: derived from GNUmakefile)")
-	versionsFile := flags.String("versions-file", "",
-		"supported-versions file (default: .github/<provider>-versions.txt)")
-	upstream := flags.String("upstream", "",
-		"upstream repository whose releases define the version window, as owner/name (required)")
-	repo := flags.String("repo", "",
-		"GitHub repository as owner/name (default: derived from `git remote get-url origin`)")
-	license := flags.String("license", defaultLicense,
-		"SPDX licence identifier stated in the generated documents")
-	var allow allowValues
-	flags.Var(&allow, "allow",
-		"exempt a checked file, as <path>:<reason> (repeatable; the reason is required)")
-	flags.Usage = func() {
-		_, _ = io.WriteString(stderr, `usage: tfkit scaffold check [flags]
+// parseAllowance parses one `path: reason` entry. Everything after the first
+// colon is the reason, so a reason may contain a colon.
+func parseAllowance(value string) (scaffold.Allowance, error) {
+	path, reason, ok := strings.Cut(value, ":")
+	if !ok || strings.TrimSpace(path) == "" || strings.TrimSpace(reason) == "" {
+		return scaffold.Allowance{}, fmt.Errorf("want <path>:<reason>, got %q", value)
+	}
+	return scaffold.Allowance{
+		Path:   strings.TrimSpace(path),
+		Reason: strings.TrimSpace(reason),
+	}, nil
+}
 
-Verifies that this repository still matches the canonical scaffold the kit owns:
+// scaffoldAllowFile is the durable per-repository exemption list. It is the
+// record of a deliberate deviation; --allow stays available for one-off
+// debugging.
+const scaffoldAllowFile = ".github/scaffold-allow.txt"
+
+// parseAllowFile parses the allow-list file. Blank lines and lines whose first
+// non-space character is # are ignored. A malformed line is a configuration
+// error, and the error names the file and line: a silently dropped exemption
+// would let drift back in without a record.
+func parseAllowFile(content string) ([]scaffold.Allowance, error) {
+	// An editor may write a UTF-8 BOM; it is not part of the first path.
+	content = strings.TrimPrefix(content, "\ufeff")
+	var entries []scaffold.Allowance
+	for i, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		entry, err := parseAllowance(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("%s:%d: %w", scaffoldAllowFile, i+1, err)
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+// loadAllowFile reads the per-repository allow list. An absent file is normal:
+// most repositories record no deviations.
+func loadAllowFile(root string) ([]scaffold.Allowance, error) {
+	full := filepath.Join(root, filepath.FromSlash(scaffoldAllowFile))
+	content, err := os.ReadFile(full)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", scaffoldAllowFile, err)
+	}
+	return parseAllowFile(string(content))
+}
+
+// scaffoldCommand is the parsed flag set shared by check and fix.
+type scaffoldCommand struct {
+	input  scaffoldInput
+	allow  allowValues
+	dryRun bool
+}
+
+// parseScaffoldFlags parses the flags both subcommands accept. It returns a nil
+// command when the command has already finished (help or usage), with the exit
+// code to report.
+func parseScaffoldFlags(command string, args []string, stderr io.Writer) (*scaffoldCommand, int) {
+	name := "tfkit scaffold " + command
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	parsed := &scaffoldCommand{}
+	flags.StringVar(&parsed.input.Provider, "provider", "",
+		"provider name without the terraform-provider- prefix (default: the directory name)")
+	flags.StringVar(&parsed.input.Product, "product", "",
+		"product display name, such as Trino (required)")
+	flags.StringVar(&parsed.input.Module, "module", "",
+		"Go module path (default: the module line of go.mod)")
+	flags.StringVar(&parsed.input.Year, "year", "",
+		"copyright year in LICENSE (required)")
+	flags.StringVar(&parsed.input.Copyright, "copyright", "",
+		"copyright holder in LICENSE (required)")
+	flags.StringVar(&parsed.input.KitVersion, "kit-version", "",
+		"kit release tag or full commit SHA the workflow callers pin (required)")
+	flags.StringVar(&parsed.input.Packages, "packages", "",
+		"go list pattern the tests and coverage gate use (default: derived from GNUmakefile)")
+	flags.StringVar(&parsed.input.VersionsFile, "versions-file", "",
+		"supported-versions file (default: .github/<provider>-versions.txt)")
+	flags.StringVar(&parsed.input.Upstream, "upstream", "",
+		"upstream repository whose releases define the version window, as owner/name (required)")
+	flags.StringVar(&parsed.input.Repo, "repo", "",
+		"GitHub repository as owner/name (default: derived from `git remote get-url origin`)")
+	flags.StringVar(&parsed.input.License, "license", defaultLicense,
+		"SPDX licence identifier stated in the generated documents")
+	flags.Var(&parsed.allow, "allow",
+		"exempt a checked file, as <path>:<reason> (repeatable; the reason is required)")
+	if command == "fix" {
+		flags.BoolVar(&parsed.dryRun, "dry-run", false,
+			"print the writes instead of performing them")
+	}
+
+	flags.Usage = func() {
+		_, _ = io.WriteString(stderr, scaffoldCommandUsage(command))
+	}
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil, exitOK
+		}
+		return nil, exitUsage
+	}
+	if flags.NArg() > 0 {
+		flags.Usage()
+		return nil, exitUsage
+	}
+	return parsed, -1
+}
+
+// scaffoldCommandUsage is the help text for one subcommand. The two commands
+// share the flags; fix adds --dry-run and the repair paragraph.
+func scaffoldCommandUsage(command string) string {
+	var action, dryRunFlag, dryRunHelp string
+	if command == "fix" {
+		action = `Writes the rendered, enforced scaffold files over this repository's copies and
+reports every path it wrote. It never writes README prose, provider-specific
+files or a path the allow list exempts, and it re-runs the check afterwards so
+the exit status is the check's. A path outside the enforced set is never
+touched.`
+		dryRunFlag = " [--dry-run]"
+		dryRunHelp = "  --dry-run        print the writes without changing a file\n"
+	} else {
+		action = `Verifies that this repository still matches the canonical scaffold the kit owns:
 the editor, ignore and lint configuration, the community files and the issue
 templates. A differing file is named with its first differing line; a missing
-file is named as missing. A deliberate deviation is recorded with --allow
-<path>:<reason>, and a placeholder without a value is a configuration error.
+file is named as missing. A placeholder without a value is a configuration
+error. The check never writes to the repository.`
+	}
+
+	return fmt.Sprintf(`usage: tfkit scaffold %s [flags]%s
+
+%s
+
+Allowances are read from %s when it exists, one `+"`path: reason`"+` per line;
+blank lines and # comments are ignored. --allow <path>:<reason> adds a one-off
+exemption for debugging. A path the check does not enforce and an allowance
+without a reason are configuration errors.
 
 The provider, module, package pattern and repository are derived from the
 repository when the matching flag is not given; the product-facing facts have no
-reliable derivation and must be supplied. The check never writes to the
-repository.
+reliable derivation and must be supplied.
 
 Exits 0 when the repository matches, 1 on drift, and 2 for a usage or
 configuration problem.
@@ -142,43 +248,85 @@ Flags:
                    (default: derived from "git remote get-url origin"; must be github.com)
   --license        SPDX licence identifier (default "MIT"; rustfs uses "Apache-2.0")
   --allow          exempt a checked file as <path>:<reason> (repeatable)
-`)
+%s`, command, dryRunFlag, action, scaffoldAllowFile, dryRunHelp)
+}
+
+// runScaffoldCheck implements `tfkit scaffold check`. Exit codes: 0 when the
+// repository matches, 1 on drift (with every differing or missing file named)
+// and 2 for a usage or configuration problem.
+func runScaffoldCheck(args []string, stdout, stderr io.Writer) int {
+	return runScaffoldCommand("check", args, stdout, stderr)
+}
+
+// runScaffoldFix implements `tfkit scaffold fix`: repair the enforced files,
+// print exactly what was written, then report the check's outcome. --dry-run
+// prints the same list without writing.
+func runScaffoldFix(args []string, stdout, stderr io.Writer) int {
+	return runScaffoldCommand("fix", args, stdout, stderr)
+}
+
+// runScaffoldCommand is the shared body of check and fix. Rendering, comparison and
+// writing belong to the scaffold package; this function owns argument parsing,
+// the durable allow list and the report.
+func runScaffoldCommand(command string, args []string, stdout, stderr io.Writer) int {
+	parsed, code := parseScaffoldFlags(command, args, stderr)
+	if parsed == nil {
+		return code
 	}
-	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return exitOK
+
+	values, err := scaffoldValues(".", parsed.input)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "scaffold-%s: %v\n", command, err)
+		return exitUsage
+	}
+
+	fileAllow, err := loadAllowFile(".")
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "scaffold-%s: %v\n", command, err)
+		return exitUsage
+	}
+	allow := append(fileAllow, parsed.allow...)
+	opts := scaffold.Options{Allow: allow}
+
+	if command == "fix" {
+		written, err := repairScaffold(parsed.dryRun, values, opts)
+		verb := "wrote"
+		if parsed.dryRun {
+			verb = "would write"
 		}
-		return exitUsage
-	}
-	if flags.NArg() > 0 {
-		flags.Usage()
-		return exitUsage
+		for _, path := range written {
+			_, _ = fmt.Fprintf(stdout, "scaffold-fix: %s %s\n", verb, path)
+		}
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "scaffold-fix: %v\n", err)
+			// An I/O refusal is a failure, not a usage or configuration
+			// problem: the partial write list above is the evidence.
+			if errors.Is(err, scaffold.ErrFixIO) {
+				return exitFailure
+			}
+			return exitUsage
+		}
 	}
 
-	values, err := scaffoldValues(".", scaffoldInput{
-		Provider:     *provider,
-		Product:      *product,
-		Module:       *module,
-		Year:         *year,
-		Copyright:    *copyright,
-		KitVersion:   *kitVersion,
-		Packages:     *packages,
-		VersionsFile: *versionsFile,
-		Upstream:     *upstream,
-		Repo:         *repo,
-		License:      *license,
-	})
+	report, err := scaffold.Check(".", values, opts)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "scaffold-check: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "scaffold-%s: %v\n", command, err)
 		return exitUsage
 	}
+	return reportScaffold(report, stdout, stderr)
+}
 
-	report, err := scaffold.Check(".", values, scaffold.Options{Allow: allow})
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "scaffold-check: %v\n", err)
-		return exitUsage
+// repairScaffold writes, or plans with dryRun, the enforced files that drift.
+func repairScaffold(dryRun bool, values map[string]string, opts scaffold.Options) ([]string, error) {
+	if dryRun {
+		return scaffold.FixPlan(".", values, opts)
 	}
+	return scaffold.Fix(".", values, opts)
+}
 
+// reportScaffold writes the allowances and problems of a check and maps the
+// report to the exit code.
+func reportScaffold(report scaffold.Report, stdout, stderr io.Writer) int {
 	for _, allowance := range report.Allowed {
 		note := ""
 		if !allowance.Used {
@@ -218,7 +366,7 @@ func printScaffoldProblems(w io.Writer, problems []scaffold.Problem) {
 	}
 }
 
-// scaffoldInput is the raw flag set runScaffoldCheck parsed.
+// scaffoldInput is the raw flag set the scaffold subcommands parsed.
 type scaffoldInput struct {
 	Provider     string
 	Product      string

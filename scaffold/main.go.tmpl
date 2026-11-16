@@ -23,8 +23,15 @@ const {{PROVIDER}}Address = "registry.terraform.io/{{REGISTRY_NAMESPACE}}/{{PROV
 // -ldflags "-X main.version=<release>".
 var version = "dev"
 
+// errUsage marks a command-line parsing failure. The flag package has already
+// written the message to stderr, so main only has to choose the exit status.
+var errUsage = errors.New("usage error")
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		if errors.Is(err, errUsage) {
+			os.Exit(2)
+		}
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -39,7 +46,7 @@ func run(args []string) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("%w: %v", errUsage, err)
 	}
 
 	return providerserver.Serve(context.Background(), provider.New(version), providerserver.ServeOpts{

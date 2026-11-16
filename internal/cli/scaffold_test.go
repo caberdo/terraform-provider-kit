@@ -3,6 +3,8 @@ package cli_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -562,6 +564,274 @@ func TestRunScaffoldCheckHelp(t *testing.T) {
 	}
 }
 
+func TestRunScaffoldFixRepairsAnUnalignedRepository(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "terraform-provider-trino")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module github.com/caberdo/terraform-provider-trino\n\ngo 1.27.4\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	runGit(t, dir, "init", "-q")
+	runGit(t, dir, "remote", "add", "origin",
+		"https://github.com/caberdo/terraform-provider-trino.git")
+	t.Chdir(dir)
+
+	args := scaffoldCheckArgs("--packages", "./...")
+	args[1] = "fix"
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(args, testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("fix exit = %d, want 0 (stdout = %q, stderr = %q)", code, stdout.String(), stderr.String())
+	}
+	for _, path := range []string{
+		"wrote .editorconfig",
+		"wrote .github/PULL_REQUEST_TEMPLATE.md",
+		"wrote .github/ISSUE_TEMPLATE/bug_report.md",
+	} {
+		if !strings.Contains(stdout.String(), path) {
+			t.Errorf("stdout = %q, want %q", stdout.String(), path)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "README.md")); !os.IsNotExist(err) {
+		t.Errorf("fix created README.md (err = %v); it must write only the enforced set", err)
+	}
+
+	var checkOut, checkErr bytes.Buffer
+	checkArgs := scaffoldCheckArgs("--packages", "./...")
+	code = cli.Run(checkArgs, testVersion, &checkOut, &checkErr)
+	if code != 0 {
+		t.Fatalf("check after fix exit = %d, want 0 (stderr = %q)", code, checkErr.String())
+	}
+}
+
+func TestRunScaffoldFixHonoursTheAllowListFile(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+	editRepoFile(t, dir, ".editorconfig", "\n# local preference\n")
+	editRepoFile(t, dir, ".gitignore", "\n# local ignore\n")
+	writeAllowFile(t, dir, "# durable deviations\n\n.editorconfig: the organisation's editor standard\n")
+
+	var stdout, stderr bytes.Buffer
+	args := scaffoldCheckArgs()
+	args[1] = "fix"
+	code := cli.Run(args, testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("fix exit = %d, want 0 because the only remaining drift is allowed (stderr = %q)",
+			code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "wrote .editorconfig") {
+		t.Errorf("stdout = %q, want the allowed path left unwritten", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "wrote .gitignore") {
+		t.Errorf("stdout = %q, want .gitignore repaired", stdout.String())
+	}
+	content, err := os.ReadFile(filepath.Join(dir, ".editorconfig"))
+	if err != nil {
+		t.Fatalf("read .editorconfig: %v", err)
+	}
+	if !strings.Contains(string(content), "# local preference") {
+		t.Error("fix overwrote an allowed path")
+	}
+}
+
+func TestRunScaffoldFixHonoursTheAllowFlag(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+	editRepoFile(t, dir, ".editorconfig", "\n# local preference\n")
+
+	var stdout, stderr bytes.Buffer
+	args := scaffoldCheckArgs("--allow", ".editorconfig:debugging this one file")
+	args[1] = "fix"
+	code := cli.Run(args, testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("fix exit = %d, want 0 because the only drift is allowed (stderr = %q)",
+			code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "wrote .editorconfig") {
+		t.Errorf("stdout = %q, want the allowed path left unwritten", stdout.String())
+	}
+}
+
+func TestRunScaffoldFixReportsPartialWritesAndExitsOne(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+	editRepoFile(t, dir, ".editorconfig", "\n# local preference\n")
+
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("outside\n"), 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	blocked := filepath.Join(dir, ".gitignore")
+	if err := os.Remove(blocked); err != nil {
+		t.Fatalf("remove .gitignore: %v", err)
+	}
+	if err := os.Symlink(outside, blocked); err != nil {
+		t.Fatalf("symlink .gitignore: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	args := scaffoldCheckArgs()
+	args[1] = "fix"
+	code := cli.Run(args, testVersion, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("fix exit = %d, want 1 for an I/O refusal (stdout = %q, stderr = %q)",
+			code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "wrote .editorconfig") {
+		t.Errorf("stdout = %q, want the file written before the refusal", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "refuse to overwrite .gitignore") {
+		t.Errorf("stderr = %q, want the refused path", stderr.String())
+	}
+	content, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("read outside file: %v", err)
+	}
+	if string(content) != "outside\n" {
+		t.Errorf("outside file = %q, want it untouched", content)
+	}
+}
+
+func TestRunScaffoldFixDryRunChangesNothing(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+	editRepoFile(t, dir, ".editorconfig", "\n# local preference\n")
+	before := snapshotTree(t, dir)
+
+	var stdout, stderr bytes.Buffer
+	args := scaffoldCheckArgs("--dry-run")
+	args[1] = "fix"
+	code := cli.Run(args, testVersion, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("dry-run exit = %d, want 1 because the drift remains (stderr = %q)", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "would write .editorconfig") {
+		t.Errorf("stdout = %q, want the planned write", stdout.String())
+	}
+	after := snapshotTree(t, dir)
+	if len(before) != len(after) {
+		t.Fatalf("file count changed from %d to %d", len(before), len(after))
+	}
+	for path, digest := range before {
+		if after[path] != digest {
+			t.Errorf("%s changed during a dry run", path)
+		}
+	}
+}
+
+func TestRunScaffoldCheckReadsTheAllowListFile(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+	editRepoFile(t, dir, ".editorconfig", "\n# local preference\n")
+	writeAllowFile(t, dir, "# durable deviations\n\n.editorconfig: the organisation's editor standard\n")
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(scaffoldCheckArgs(), testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stdout = %q, stderr = %q)", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "allowed") ||
+		!strings.Contains(stdout.String(), "the organisation's editor standard") {
+		t.Errorf("stdout = %q, want the file's allowance and its reason", stdout.String())
+	}
+}
+
+func TestRunScaffoldCheckRejectsAnAllowListLineWithoutAReason(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+	writeAllowFile(t, dir, "# durable deviations\n.editorconfig:\n")
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(scaffoldCheckArgs(), testVersion, &stdout, &stderr)
+
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "scaffold-allow.txt:2") ||
+		!strings.Contains(stderr.String(), "reason") {
+		t.Errorf("stderr = %q, want the line number and the missing reason", stderr.String())
+	}
+}
+
+func TestRunScaffoldCheckRejectsADuplicateAllowListPath(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+	writeAllowFile(t, dir, ".editorconfig: first reason\n.editorconfig: second reason\n")
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(scaffoldCheckArgs(), testVersion, &stdout, &stderr)
+
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "listed twice") {
+		t.Errorf("stderr = %q, want the duplicate path named", stderr.String())
+	}
+}
+
+// writeAllowFile writes the per-repository allow list.
+func writeAllowFile(t *testing.T, dir, content string) {
+	t.Helper()
+
+	path := filepath.Join(dir, ".github", "scaffold-allow.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir for the allow file: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write the allow file: %v", err)
+	}
+}
+
+// snapshotTree hashes every regular file under dir, keyed by slash path, so a
+// test can compare a directory before and after a command.
+func snapshotTree(t *testing.T, dir string) map[string][sha256.Size]byte {
+	t.Helper()
+
+	snapshot := make(map[string][sha256.Size]byte)
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		snapshot[filepath.ToSlash(relative)] = sha256.Sum256(content)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshot %s: %v", dir, err)
+	}
+	return snapshot
+}
+
+func TestRunScaffoldFixHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{"scaffold", "fix", "-h"}, testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if !strings.Contains(stderr.String(), "tfkit scaffold fix") {
+		t.Errorf("stderr = %q, want the usage", stderr.String())
+	}
+}
+
 func TestRunScaffoldWithoutASubcommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := cli.Run([]string{"scaffold"}, testVersion, &stdout, &stderr)
@@ -571,5 +841,8 @@ func TestRunScaffoldWithoutASubcommand(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "scaffold requires a subcommand") {
 		t.Errorf("stderr = %q, want the dispatch error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "fix") || !strings.Contains(stderr.String(), "--dry-run") {
+		t.Errorf("stderr = %q, want fix and --dry-run in the command list", stderr.String())
 	}
 }

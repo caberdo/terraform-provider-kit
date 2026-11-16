@@ -4,11 +4,13 @@
 // The scaffold is the shape every caberdo provider repository shares: the
 // community files, the editor, ignore and lint configuration, and the workflow
 // callers. Render substitutes the provider-specific values; Check compares a
-// repository against the rendered files that must be identical.
+// repository against the rendered files that must be identical; Fix writes the
+// rendered enforced files over a drifting repository.
 //
 // Check is check-only by design: it never writes into the repository it reads,
-// so a drift run cannot turn a review finding into a silent edit. A `--fix`
-// mode belongs to a later change.
+// so a drift run cannot turn a review finding into a silent edit. Fix is the
+// separate, explicit repair: it writes only the enforced set and never touches
+// README prose or a provider's own files.
 package scaffold
 
 import (
@@ -95,6 +97,11 @@ type Allowance struct {
 	Reason string
 	Used   bool
 }
+
+// ErrFixIO marks a failure to inspect or replace a file while Fix is applying
+// its plan. It is an I/O refusal, not a configuration problem: the caller
+// should report the partial write list and exit 1, not 2.
+var ErrFixIO = errors.New("fix scaffold file")
 
 // Options configures Check.
 type Options struct {
@@ -303,7 +310,7 @@ func Check(root string, values map[string]string, opts Options) (Report, error) 
 		return Report{}, err
 	}
 
-	checked, err := enforcedPaths(rendered)
+	checked, content, err := enforcedFiles(root, rendered)
 	if err != nil {
 		return Report{}, err
 	}
@@ -323,7 +330,7 @@ func Check(root string, values map[string]string, opts Options) (Report, error) 
 	}
 
 	for _, rel := range checked {
-		problem, err := compare(root, rel, rendered[rel])
+		problem, err := compare(root, rel, content[rel])
 		if err != nil {
 			return Report{}, err
 		}
@@ -340,10 +347,119 @@ func Check(root string, values map[string]string, opts Options) (Report, error) 
 	return report, nil
 }
 
-// enforcedPaths returns the literal list plus the issue templates the scaffold
-// carries, and fails when the scaffold is missing a file it claims to enforce.
-func enforcedPaths(rendered map[string][]byte) ([]string, error) {
-	checked := append([]string(nil), enforced...)
+// Fix writes the canonical content of every enforced file that is missing or
+// differs, and returns the repository-relative paths it wrote in check order.
+//
+// It honours the same allowances as Check: an allowed path is never written,
+// so a deliberate deviation survives a mechanical repair. A rendered file
+// outside the enforced set (README prose, AGENTS.md, provider-specific files)
+// is never a candidate: Fix repairs the contract, it does not copy the tree.
+//
+// The caller is expected to re-run Check afterwards; Fix reports what it did,
+// not whether the repository is now clean.
+func Fix(root string, values map[string]string, opts Options) ([]string, error) {
+	return fix(root, values, opts, true)
+}
+
+// FixPlan returns the paths Fix would write, in check order, without touching
+// the repository. It is the dry run behind `tfkit scaffold fix --dry-run`.
+func FixPlan(root string, values map[string]string, opts Options) ([]string, error) {
+	return fix(root, values, opts, false)
+}
+
+// fix is Fix and FixPlan with the write suppressed for the plan. It shares
+// rendering, enforcement and allowance validation with Check, so a path the
+// check reports is exactly a path the repair targets.
+func fix(root string, values map[string]string, opts Options, apply bool) ([]string, error) {
+	rendered, err := renderFS(assets.FS, values)
+	if err != nil {
+		return nil, err
+	}
+
+	checked, content, err := enforcedFiles(root, rendered)
+	if err != nil {
+		return nil, err
+	}
+
+	allow, err := normalizeAllowances(opts.Allow, checked)
+	if err != nil {
+		return nil, err
+	}
+
+	enforcedSet := make(map[string]struct{}, len(checked))
+	for _, rel := range checked {
+		enforcedSet[rel] = struct{}{}
+	}
+
+	var written []string
+	for _, rel := range checked {
+		if _, allowed := allow[rel]; allowed {
+			continue
+		}
+		// A rendered path outside the enforced set must never be written. The
+		// loop already ranges over the enforced list; the guard keeps a future
+		// refactor from turning Fix into a tree copy.
+		if !contains(enforcedSet, rel) {
+			return written, fmt.Errorf("refuse to write %s: not an enforced path", rel)
+		}
+
+		problem, err := compare(root, rel, content[rel])
+		if err != nil {
+			return written, fmt.Errorf("%w: %v", ErrFixIO, err)
+		}
+		if problem == nil {
+			continue
+		}
+		if apply {
+			if err := writeCanonical(root, rel, content[rel]); err != nil {
+				return written, fmt.Errorf("%w: %v", ErrFixIO, err)
+			}
+		}
+		written = append(written, rel)
+	}
+	return written, nil
+}
+
+// writeCanonical replaces one enforced file. A path that exists but is not a
+// regular file is refused rather than followed or replaced: a symlink may point
+// outside the repository, and a directory is not a drifting file.
+func writeCanonical(root, rel string, content []byte) error {
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	info, err := os.Lstat(full)
+	switch {
+	case err == nil && !info.Mode().IsRegular():
+		return fmt.Errorf("refuse to overwrite %s: not a regular file", rel)
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("%s: %w", rel, err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return fmt.Errorf("%s: %w", rel, err)
+	}
+	if err := os.WriteFile(full, content, 0o644); err != nil {
+		return fmt.Errorf("%s: %w", rel, err)
+	}
+	return nil
+}
+
+// enforcedFiles returns the paths the check compares and the content each path
+// must carry, in report order.
+//
+// The issue templates follow the repository's existing form: a repository that
+// already ships .yml issue forms is checked and repaired as .yml, with the
+// scaffold's rendered template content, instead of gaining competing .md
+// siblings. A repository with the scaffold's .md forms stays on .md.
+func enforcedFiles(root string, rendered map[string][]byte) ([]string, map[string][]byte, error) {
+	content := make(map[string][]byte, len(enforced))
+	checked := make([]string, 0, len(enforced))
+	for _, rel := range enforced {
+		body, ok := rendered[rel]
+		if !ok {
+			return nil, nil, fmt.Errorf("scaffold has no %q", rel)
+		}
+		checked = append(checked, rel)
+		content[rel] = body
+	}
 
 	templates := make([]string, 0)
 	for p := range rendered {
@@ -353,16 +469,36 @@ func enforcedPaths(rendered map[string][]byte) ([]string, error) {
 	}
 	sort.Strings(templates)
 	if len(templates) == 0 {
-		return nil, fmt.Errorf("scaffold has no %s/* files", issueTemplateDir)
+		return nil, nil, fmt.Errorf("scaffold has no %s/* files", issueTemplateDir)
 	}
-	checked = append(checked, templates...)
 
-	for _, rel := range checked {
-		if _, ok := rendered[rel]; !ok {
-			return nil, fmt.Errorf("scaffold has no %q", rel)
+	extension, err := issueTemplateExtension(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, template := range templates {
+		target := strings.TrimSuffix(template, ".md") + extension
+		checked = append(checked, target)
+		content[target] = rendered[template]
+	}
+	return checked, content, nil
+}
+
+// issueTemplateExtension picks the form the repository already uses. Only .yml
+// is recognised: the two shapes in the provider family are the scaffold's .md
+// template and the GitHub issue form, whose files are .yml.
+func issueTemplateExtension(root string) (string, error) {
+	matches, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(issueTemplateDir), "*.yml"))
+	if err != nil {
+		return "", fmt.Errorf("list %s forms: %w", issueTemplateDir, err)
+	}
+	for _, match := range matches {
+		info, err := os.Lstat(match)
+		if err == nil && info.Mode().IsRegular() {
+			return ".yml", nil
 		}
 	}
-	return checked, nil
+	return ".md", nil
 }
 
 // normalizeAllowances validates the exemptions and indexes them by path. A path
@@ -408,11 +544,13 @@ func normalizePath(value string) (string, error) {
 	return cleaned, nil
 }
 
-// compare reads one enforced path. A path that is absent or not a regular file
-// is missing; a read that fails after that keeps the underlying error.
+// compare reads one enforced path. A path that is absent, a symlink or not a
+// regular file is missing: comparison never follows a link out of the
+// repository, and writing a file through one would overwrite something the
+// checker did not inspect.
 func compare(root, rel string, want []byte) (*Problem, error) {
 	full := filepath.Join(root, filepath.FromSlash(rel))
-	info, err := os.Stat(full)
+	info, err := os.Lstat(full)
 	if errors.Is(err, fs.ErrNotExist) {
 		return &Problem{Path: rel, Kind: Missing}, nil
 	}
