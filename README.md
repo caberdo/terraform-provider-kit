@@ -40,6 +40,9 @@ Pin the caller to a release tag (or a full commit SHA), never to `@main`: the re
 status-check names derive from these job ids, and a drifting pin is what the kit's drift check
 exists to catch.
 
+Every job's display name in the shared workflows is static (for example `ci / Generate Docs`), so
+a required status check can name it literally; no input changes a job's reported context.
+
 ## Running tfkit
 
 ```bash
