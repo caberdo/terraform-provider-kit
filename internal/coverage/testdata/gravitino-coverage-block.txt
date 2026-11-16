@@ -1,0 +1,21 @@
+<!-- coverage:start -->
+```
+internal/client                 ████████████████░░░░  79.7%   floor 79.0%
+internal/models                 █████████████████░░░  86.3%   floor 85.5%
+internal/provider               ███████████████████░  94.6%   floor 94.0%
+internal/client/auth            ███████████████░░░░░  76.7%   floor 76.0%
+internal/datasources/schema     ███████████████████░  94.6%   floor 94.0%
+internal/datasources/policy     █████████████████░░░  86.1%   floor 85.5%
+internal/datasources/role       █████████████████░░░  85.6%   floor 85.0%
+internal/datasources/fileset    █████████████████░░░  86.5%   floor 86.0%
+internal/datasources/partition  ██████████████████░░  92.2%   floor 91.5%
+internal/resources/partition    ██████████████████░░  92.4%   floor 91.5%
+total                           █████████████████░░░  83.4%   floor 82.5%   -> 80%, then 90%
+```
+
+Merged statement coverage from `coverage.out` (unit) and `coverage-acceptance.out`
+(acceptance, `-covermode=atomic -coverpkg=./internal/...`) via `scripts/merge-coverage.sh`
+(`make coverage-merge`).
+
+Measured on `c2fc783` (unit + acceptance) on 2026-10-19.
+<!-- coverage:end -->

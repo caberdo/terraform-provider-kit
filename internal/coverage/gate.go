@@ -16,9 +16,13 @@ const TotalPackage = "total"
 
 // Report is the outcome of a gate run: the measured module total and every
 // floor that was missed.
+//
+// Scopes is populated by [GateScopes] only, whose report is a table of every
+// scope rather than a single total; the bare-baseline [Gate] leaves it empty.
 type Report struct {
 	Total    float64
 	Failures []Failure
+	Scopes   []ScopeResult
 }
 
 // Failure is one missed floor. Package is [TotalPackage] when the module total
@@ -38,6 +42,13 @@ type PackageCoverage struct {
 // Total returns the statement coverage of the whole profile as a percentage,
 // rounded to one decimal place like `go tool cover -func` prints it.
 func Total(p Profile) float64 {
+	return totalCoverage(p, 1)
+}
+
+// totalCoverage returns the statement coverage of the whole profile rounded to
+// digits decimal places. The scope dialect compares at two decimals, because
+// its shell script summarises the profile with `printf "%.2f"` first.
+func totalCoverage(p Profile, digits int) float64 {
 	statements, covered := 0, 0
 	for _, block := range p.Blocks {
 		statements += block.NumStmt
@@ -48,24 +59,23 @@ func Total(p Profile) float64 {
 	if statements == 0 {
 		return 0
 	}
-	return roundTo(100*float64(covered)/float64(statements), 1)
+	return roundTo(100*float64(covered)/float64(statements), digits)
 }
 
-// Measure returns the statement coverage of each package in packages, in the
-// order given. A package with no blocks in the profile is measured at 0, so a
-// package whose tests were deleted cannot pass a floor.
+// coverageTally is the statement count of one package.
+type coverageTally struct {
+	statements int
+	covered    int
+}
+
+// tallyPackages sums the profile blocks per listed package.
 //
 // Profile paths are full import paths (`github.com/.../internal/x/a.go`) while
 // packages are repo-relative (`internal/x`), so a block belongs to the longest
 // listed package name its directory ends in. Blocks outside every listed
 // package are left out, as the shell script leaves them out of its table; they
 // still count towards [Total].
-func Measure(p Profile, packages []string) []PackageCoverage {
-	type tally struct {
-		statements int
-		covered    int
-	}
-
+func tallyPackages(p Profile, packages []string) map[string]*coverageTally {
 	longestFirst := slices.Clone(packages)
 	slices.SortFunc(longestFirst, func(a, b string) int {
 		if diff := len(b) - len(a); diff != 0 {
@@ -74,7 +84,7 @@ func Measure(p Profile, packages []string) []PackageCoverage {
 		return strings.Compare(a, b)
 	})
 
-	tallies := make(map[string]*tally, len(packages))
+	tallies := make(map[string]*coverageTally, len(packages))
 	for _, block := range p.Blocks {
 		dir := path.Dir(block.File)
 		for _, name := range longestFirst {
@@ -83,7 +93,7 @@ func Measure(p Profile, packages []string) []PackageCoverage {
 			}
 			count := tallies[name]
 			if count == nil {
-				count = &tally{}
+				count = &coverageTally{}
 				tallies[name] = count
 			}
 			count.statements += block.NumStmt
@@ -93,6 +103,14 @@ func Measure(p Profile, packages []string) []PackageCoverage {
 			break
 		}
 	}
+	return tallies
+}
+
+// Measure returns the statement coverage of each package in packages, in the
+// order given. A package with no blocks in the profile is measured at 0, so a
+// package whose tests were deleted cannot pass a floor.
+func Measure(p Profile, packages []string) []PackageCoverage {
+	tallies := tallyPackages(p, packages)
 
 	measured := make([]PackageCoverage, len(packages))
 	for i, name := range packages {

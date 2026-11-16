@@ -1,0 +1,72 @@
+# Statement-coverage baseline for the merged unit + acceptance profile.
+#
+# `scripts/coverage-readme.sh` renders README.md's badge and coverage block from
+# this file, and `scripts/coverage-gate.sh` fails a run whose merged coverage
+# falls below a `floor_*` value. The badge, the block and the gate therefore
+# cannot disagree: they all read this file, and CI fails when README.md is out
+# of sync with it.
+#
+# Keys. `measured_<scope>` names a scope and needs a matching `floor_<scope>`;
+# `_` is the path separator in the rendered label, so `measured_internal_client`
+# renders `internal/client`. `measured_total` is required and drives the badge.
+# `measured_commit` and `measured_date` describe the last measurement,
+# `target`/`gold` are the tracked milestones.
+#
+# The gate is `make coverage-gate` (`scripts/coverage-gate.sh`), which the
+# `Coverage` job runs on every pull request after the acceptance container has
+# written its profile. It parses this file with the same rules as
+# `coverage-readme.sh` and additionally requires every scope named here to appear
+# in the merged profile: a missing, misspelled or stray `floor_*`, or a scope
+# that drops out of the profile, is a configuration error (exit 2), never a pass.
+#
+# The measurement is the merged profile the committed tooling produces: the bare
+# unit profile (`make coverage`, `coverage.out`) merged with the instrumented
+# acceptance container's profile (`coverage-acceptance.out`,
+# `-covermode=atomic -coverpkg=./internal/...`) by `scripts/merge-coverage.sh`
+# (`make coverage-merge`). To raise the floor: run `make coverage` and
+# `make coverage-merge`, update `measured_*` and `floor_*` here, then run
+# `make coverage-readme` and commit the result.
+#
+# `measured_*` is what the project last observed; `floor_*` is the enforced
+# minimum, kept half a point below the measurement (rounded down to the next half
+# point) so environment jitter cannot fail a run on its own.
+#
+# The scopes below the four original ones are the areas the coverage issues named
+# as real gaps; each floor is only as high as the tests committed with it. A floor
+# is never lowered: raising one is a deliberate line in a pull request.
+#
+# Deliberately not a scope: internal/datasources/secrets. It wraps the Gravitino
+# 1.4 secrets API, which cannot be exercised against the 1.3.0/1.3.1 servers this
+# provider supports, so a floor there would measure the fake only.
+
+# Last measurement: merged unit + acceptance on Go 1.27.2, 7,661 statements.
+measured_internal_client=79.7
+measured_internal_models=86.3
+measured_internal_provider=94.6
+measured_internal_client_auth=76.7
+measured_internal_datasources_schema=94.6
+measured_internal_datasources_policy=86.1
+measured_internal_datasources_role=85.6
+measured_internal_datasources_fileset=86.5
+measured_internal_datasources_partition=92.2
+measured_internal_resources_partition=92.4
+measured_total=83.4
+measured_commit=c2fc783
+measured_date=2026-10-19
+
+# Enforced floor.
+floor_internal_client=79.0
+floor_internal_models=85.5
+floor_internal_provider=94.0
+floor_internal_client_auth=76.0
+floor_internal_datasources_schema=94.0
+floor_internal_datasources_policy=85.5
+floor_internal_datasources_role=85.0
+floor_internal_datasources_fileset=86.0
+floor_internal_datasources_partition=91.5
+floor_internal_resources_partition=91.5
+floor_total=82.5
+
+# Milestones tracked in the issue tracker.
+target=80
+gold=90

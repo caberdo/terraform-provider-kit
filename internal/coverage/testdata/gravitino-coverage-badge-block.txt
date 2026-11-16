@@ -1,0 +1,3 @@
+<!-- coverage-badge:start -->
+[![Coverage](https://img.shields.io/badge/coverage-83.4%25-green)](#coverage)
+<!-- coverage-badge:end -->

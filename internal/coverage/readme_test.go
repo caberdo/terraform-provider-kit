@@ -383,6 +383,33 @@ func TestRenderReadmeFailsWhenTheMarkersAreReversed(t *testing.T) {
 	}
 }
 
+func TestRenderReadmeRejectsAScopeBadgePair(t *testing.T) {
+	// A bare-percentage baseline renders only the floor block. A README that also
+	// carries the scope badge pair would keep an old badge forever while --check
+	// passed, so it is a configuration error instead.
+	doc := strings.Replace(trinoReadmeStale,
+		"<!-- coverage:start -->",
+		"<!-- coverage-badge:start -->\n"+
+			"[![Coverage](https://img.shields.io/badge/coverage-83.4%25-green)](#coverage)\n"+
+			"<!-- coverage-badge:end -->\n"+
+			"\n"+
+			"<!-- coverage:start -->", 1)
+
+	rendered, err := coverage.RenderReadme([]byte(doc), 80, defaultGateCommand)
+
+	if !errors.Is(err, coverage.ErrReadmeMarkers) {
+		t.Fatalf("RenderReadme() error = %v, want ErrReadmeMarkers", err)
+	}
+	if rendered != nil {
+		t.Errorf("RenderReadme() = %q, want nil on error", rendered)
+	}
+	for _, want := range []string{"coverage-badge:start", "bare-percentage"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
 func TestCheckReadmeReportsStale(t *testing.T) {
 	doc := []byte(trinoReadmeStale)
 	before := bytes.Clone(doc)

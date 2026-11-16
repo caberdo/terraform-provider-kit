@@ -555,7 +555,8 @@ Flags:
   --profile   path of the cover profile to check (default "coverage.out")
   --baseline  path of the statement-coverage baseline (default ".github/coverage-baseline.txt")
   --floors    path of the per-package floors; when absent only the total is gated
-              (default ".github/coverage-floors.txt")
+              (default ".github/coverage-floors.txt"); not used when the baseline
+              is the key=value dialect, whose floors live in that file
   --packages  go list pattern for the packages to check (default "./internal/...")
 `)
 	}
@@ -575,9 +576,23 @@ Flags:
 		_, _ = fmt.Fprintf(stderr, "coverage-gate: %v\n", err)
 		return exitUsage
 	}
-	baseline, err := readBaselineFile(*baselinePath)
+	baselineData, err := readBaselineData(*baselinePath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "coverage-gate: %v\n", err)
+		return exitUsage
+	}
+
+	// The file is the interface: a baseline that carries `floor_` keys is the
+	// key=value scope dialect and is gated by GateScopes, everything else by
+	// the bare-percentage Gate. A flag would let a provider gate with the
+	// wrong parser by forgetting it, so there is none.
+	if coverage.ScopeDialect(baselineData) {
+		return runCoverageGateScopes(profile, baselineData, *profilePath, *baselinePath, *patterns, stdout, stderr)
+	}
+
+	baseline, err := coverage.ReadBaseline(bytes.NewReader(baselineData))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: %s: %v\n", *baselinePath, err)
 		return exitUsage
 	}
 
@@ -637,6 +652,50 @@ Flags:
 	return exitOK
 }
 
+// runCoverageGateScopes implements `tfkit coverage gate` for the key=value
+// baseline dialect: the floors live in the baseline file, so no floors file is
+// read. It prints the dialect it chose on stderr, keeping stdout byte-identical
+// to the shell script whose CI output it replaces.
+func runCoverageGateScopes(
+	profile coverage.Profile,
+	baselineData []byte,
+	profilePath, baselinePath, patterns string,
+	stdout, stderr io.Writer,
+) int {
+	_, _ = fmt.Fprintf(stderr, "coverage-gate: baseline dialect: key=value (%s carries floor_ keys)\n", baselinePath)
+
+	baseline, err := coverage.ParseScopeBaseline(bytes.NewReader(baselineData))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: %s: %v\n", baselinePath, err)
+		return exitUsage
+	}
+
+	packages, err := listGoPackages(patterns)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: go list %q: %v\n", patterns, err)
+		return exitUsage
+	}
+	if len(packages) == 0 {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: go list %q returned no packages\n", patterns)
+		return exitUsage
+	}
+
+	report, err := coverage.GateScopes(profile, baseline, packages)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: %v\n", err)
+		return exitUsage
+	}
+
+	if err := coverage.WriteScopeReport(stdout, baseline, report, profilePath, baselinePath); err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: %v\n", err)
+		return exitFailure
+	}
+	if len(report.Failures) > 0 {
+		return exitFailure
+	}
+	return exitOK
+}
+
 // runCoverageReadme implements `tfkit coverage readme`. It owns file handling
 // and the messages; rendering and checking the block belongs to the coverage
 // package. The gate command is a flag so the sentence can name `make
@@ -675,14 +734,24 @@ Flags:
 		_, _ = fmt.Fprintf(stderr, "coverage-readme: %v\n", err)
 		return exitUsage
 	}
-	baseline, err := readBaselineFile(*baselinePath)
+	baselineData, err := readBaselineData(*baselinePath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "coverage-readme: %v\n", err)
 		return exitUsage
 	}
 
+	// The baseline file decides the rendering, exactly as it decides the gate:
+	// `floor_` keys mean the key=value scope dialect, with its measured badge and
+	// per-scope bar table; anything else is the bare-percentage floor block. A
+	// flag would let a provider render the wrong shape by forgetting it.
+	block, err := readmeBlocks(doc, baselineData, *gateCommand)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-readme: %s: %v\n", *baselinePath, err)
+		return exitUsage
+	}
+
 	if *check {
-		if err := coverage.CheckReadme(doc, baseline, *gateCommand); err != nil {
+		if err := block.check(); err != nil {
 			if errors.Is(err, coverage.ErrReadmeStale) {
 				_, _ = fmt.Fprintf(stderr, "coverage-readme: '%s' is out of date with '%s'\n", *readmePath, *baselinePath)
 				_, _ = io.WriteString(stderr, "Run 'make coverage-readme' and commit the result.\n")
@@ -695,7 +764,7 @@ Flags:
 		return exitOK
 	}
 
-	rendered, err := coverage.RenderReadme(doc, baseline, *gateCommand)
+	rendered, err := block.render()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "coverage-readme: '%s': %v\n", *readmePath, err)
 		return exitUsage
@@ -713,6 +782,40 @@ Flags:
 
 	_, _ = fmt.Fprintf(stdout, "coverage-readme: updated '%s' from '%s'\n", *readmePath, *baselinePath)
 	return exitOK
+}
+
+// readmeBlock is one dialect's renderer: the rewrite and the drift check, so the
+// caller never compares bytes itself and a check can never write.
+type readmeBlock struct {
+	render func() ([]byte, error)
+	check  func() error
+}
+
+// readmeBlocks chooses the block shape and parses the baseline for it, once, so
+// a configuration error is reported before anything is written. A baseline with
+// `floor_` keys is the key=value scope dialect, whose floors live in the same
+// file; everything else is the bare-percentage floor block, which ignores the
+// scope fields.
+func readmeBlocks(doc, baselineData []byte, gateCommand string) (readmeBlock, error) {
+	if coverage.ScopeDialect(baselineData) {
+		baseline, err := coverage.ParseScopeBaseline(bytes.NewReader(baselineData))
+		if err != nil {
+			return readmeBlock{}, err
+		}
+		return readmeBlock{
+			render: func() ([]byte, error) { return coverage.RenderScopeReadme(doc, baseline) },
+			check:  func() error { return coverage.CheckScopeReadme(doc, baseline) },
+		}, nil
+	}
+
+	baseline, err := coverage.ReadBaseline(bytes.NewReader(baselineData))
+	if err != nil {
+		return readmeBlock{}, err
+	}
+	return readmeBlock{
+		render: func() ([]byte, error) { return coverage.RenderReadme(doc, baseline, gateCommand) },
+		check:  func() error { return coverage.CheckReadme(doc, baseline, gateCommand) },
+	}, nil
 }
 
 // readReadmeFile reads the README at path and returns its permissions, so a
@@ -779,22 +882,17 @@ func readProfileFile(path string) (coverage.Profile, error) {
 	return profile, nil
 }
 
-// readBaselineFile reads the bare-percentage baseline at path.
-func readBaselineFile(path string) (float64, error) {
-	file, err := os.Open(path)
+// readBaselineData reads the raw baseline bytes. The dialect is detected from
+// the file's keys, so the gate needs the content before it can choose a parser.
+func readBaselineData(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return 0, fmt.Errorf("baseline %q not found", path)
+			return nil, fmt.Errorf("baseline %q not found", path)
 		}
-		return 0, err
+		return nil, err
 	}
-	defer func() { _ = file.Close() }()
-
-	baseline, err := coverage.ReadBaseline(file)
-	if err != nil {
-		return 0, fmt.Errorf("%s: %w", path, err)
-	}
-	return baseline, nil
+	return data, nil
 }
 
 // readFloorsFile reads the per-package floors at path. A missing file is not an

@@ -1,0 +1,9 @@
+<!-- coverage:start -->
+```
+pkg/rustfs  ████████████████████  97.8%   floor 97.3%
+provider    ██████████████████░░  88.0%   floor 87.5%
+total       ██████████████████░░  90.2%   floor 89.5%   milestones 80% and 90% met
+```
+
+Measured on `f84538b` (unit + acceptance) on 2026-10-19.
+<!-- coverage:end -->
