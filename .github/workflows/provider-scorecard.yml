@@ -5,7 +5,10 @@
 # OpenSSF API (which is what the README badge reads) and uploaded to code
 # scanning as SARIF.
 #
-# The caller must grant `security-events: write` and `id-token: write`.
+# The caller must grant `contents: read`, `security-events: write` and
+# `id-token: write`. The workflow-level `permissions: contents: read` is part of
+# the contract: a caller job that omits `contents` is rejected at startup, the
+# same way a window-level `read-all` would be.
 name: Provider Scorecard
 
 on:

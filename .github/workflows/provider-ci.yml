@@ -15,15 +15,20 @@
 #   versions          Supported Versions
 #
 # Do not rename a job or a display name: several rulesets require these
-# contexts. Additive jobs (vuln, coverage, docs, mdvalidate, versions) report as
+# contexts. Additive jobs (vuln, coverage, mdvalidate, versions) report as
 # *skipped* for a provider that does not opt in, and a skipped context satisfies
 # a required check, so they can be added to a ruleset before they do any work.
+# `docs` is additive too, but it is deliberately unconditional: it always runs,
+# reports success and writes a "disabled" line to the step summary, because
+# openmetadata's ruleset requires a context literally named `Docs`.
 #
 # A display name must be static whenever the job can be skipped: GitHub does not
 # evaluate `name:` for a job that does not run, so an input-driven name would
 # surface as the literal expression in the status-check context. `versions` is
-# skipped on pull requests by design, hence the literal `Supported Versions`;
-# `docs` is the only input-driven name left and its job is unconditional.
+# skipped on pull requests by design, hence the literal `Supported Versions`.
+# `docs` is the only input-driven name left, and it is safe only because that
+# job has no `if:` and therefore always evaluates its name; do not make it
+# conditional without first giving it a static name.
 #
 # The caller must grant `security-events: write` for `lint` and, for
 # `docs-mode: autopr`, `contents: write` + `pull-requests: write` for `docs`.
