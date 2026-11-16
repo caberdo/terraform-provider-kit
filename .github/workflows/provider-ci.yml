@@ -15,19 +15,22 @@
 #   versions          Supported Versions
 #
 # Do not rename a job or a display name: several rulesets require these
-# contexts. Additive jobs (vuln, coverage, mdvalidate, versions) report as
-# *skipped* for a provider that does not opt in, and a skipped context satisfies
-# a required check, so they can be added to a ruleset before they do any work.
+# contexts. Additive jobs (coverage, mdvalidate, versions) report as *skipped*
+# for a provider that does not opt in, and a skipped context satisfies a
+# required check, so they can be added to a ruleset before they do any work.
 # `docs` is additive too, but its work is gated at step level by
 # `env.DOCS_ENABLED` instead of a job-level `if:`, so the job itself has no
-# `if:`.
+# `if:`. `vuln` is not additive: no job-level `if:` ever skips it, so it runs
+# and reports its own context on every run, whether the scan happens in `lint`
+# (script), in the job itself (action, install) or nowhere (none).
 #
-# `vuln` must stay out of every `needs:` chain, for the same reason: a job that
-# needs `vuln` is skipped when the vulnerability scan fails, and a skipped
-# required check counts as a pass. `test` therefore needs only `lint` and
-# `coverage` only `test`, so a govulncheck finding cannot let a pull request
-# merge with the unit suite and the coverage gate never having run. `vuln` still
-# runs unconditionally, so it keeps its own required context.
+# That is also why `vuln` must stay out of every `needs:` chain: a job that
+# needs it is skipped when the vulnerability scan fails, and a skipped required
+# check counts as a pass. `test` therefore needs only `lint` and `coverage` only
+# `test`, so a govulncheck finding cannot let a pull request merge with the unit
+# suite and the coverage gate never having run. `test` and `vuln` now run
+# concurrently, and the old `vuln` -> `test` ordering is intentionally dropped:
+# the two share no artifact and no output, so nothing is lost.
 #
 # Every display name is static, without exception. A skipped job reports the raw
 # expression instead of an evaluated name (`ci / inputs.versions-job-name`), and
