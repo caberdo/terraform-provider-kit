@@ -245,6 +245,42 @@ var (
 	newBranchProtectionGit    = branchprotection.NewGit
 )
 
+// contextsValue is the --contexts flag: a comma-separated list of required
+// status check contexts, trimmed per entry. An empty entry is rejected while
+// the flag is parsed, so a doubled or trailing comma is a usage error instead
+// of a requirement for a context named "". The zero value means the flag was
+// not given, which lets the branchprotection package fall back to
+// REQUIRED_CONTEXTS and its default.
+type contextsValue struct {
+	contexts []string
+}
+
+// String renders the list the way it was given, for flag diagnostics.
+func (v *contextsValue) String() string {
+	return strings.Join(v.contexts, ",")
+}
+
+// Set parses one comma-separated list. It is called by flag.Parse, which turns
+// the error into a usage exit.
+func (v *contextsValue) Set(value string) error {
+	parts := strings.Split(value, ",")
+	contexts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			return fmt.Errorf("--contexts has an empty entry in %q; use a comma-separated list", value)
+		}
+		contexts = append(contexts, trimmed)
+	}
+	v.contexts = contexts
+	return nil
+}
+
+// List returns the parsed contexts, or nil when the flag was not given.
+func (v *contextsValue) List() []string {
+	return v.contexts
+}
+
 // runBranchProtection dispatches the branch-protection subcommands.
 func runBranchProtection(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -278,6 +314,9 @@ func runBranchProtectionCheck(args []string, stdout, stderr io.Writer) int {
 		`ruleset name (default $RULESET_NAME, else "main-protection")`)
 	soft := flags.Bool("soft", os.Getenv("BRANCH_PROTECTION_SOFT") == "1",
 		"warn and exit 0 instead of exiting 3 when the ruleset cannot be read")
+	var contexts contextsValue
+	flags.Var(&contexts, "contexts",
+		`comma-separated required status check contexts (default $REQUIRED_CONTEXTS, else "Lint & Security,Test")`)
 	flags.Usage = func() {
 		_, _ = io.WriteString(stderr, `usage: tfkit branch-protection check [flags]
 
@@ -294,6 +333,8 @@ Flags:
   --repo      repository as owner/name
               (default $GITHUB_REPOSITORY, else gh repo view)
   --ruleset   ruleset name (default $RULESET_NAME, else "main-protection")
+  --contexts  comma-separated required status check contexts, trimmed per entry
+              (default $REQUIRED_CONTEXTS, else "Lint & Security,Test")
   --soft      warn and exit 0 instead of exiting 3 when the ruleset cannot be
               read (default $BRANCH_PROTECTION_SOFT=1)
 `)
@@ -310,13 +351,14 @@ Flags:
 	}
 
 	status, err := branchprotection.Check(branchprotection.CheckOptions{
-		Repo:    *repo,
-		Ruleset: *ruleset,
-		Soft:    *soft,
-		GitHub:  newBranchProtectionGitHub(),
-		Git:     newBranchProtectionGit(),
-		Stdout:  stdout,
-		Stderr:  stderr,
+		Repo:     *repo,
+		Ruleset:  *ruleset,
+		Contexts: contexts.List(),
+		Soft:     *soft,
+		GitHub:   newBranchProtectionGitHub(),
+		Git:      newBranchProtectionGit(),
+		Stdout:   stdout,
+		Stderr:   stderr,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "branch-protection check: %v\n", err)
@@ -338,6 +380,9 @@ func runBranchProtectionSetup(args []string, stdout, stderr io.Writer) int {
 		"repository as owner/name (default $GITHUB_REPOSITORY, else gh repo view)")
 	ruleset := flags.String("ruleset", os.Getenv("RULESET_NAME"),
 		`ruleset name (default $RULESET_NAME, else "main-protection")`)
+	var contexts contextsValue
+	flags.Var(&contexts, "contexts",
+		`comma-separated required status check contexts (default $REQUIRED_CONTEXTS, else "Lint & Security,Test")`)
 	flags.Usage = func() {
 		_, _ = io.WriteString(stderr, `usage: tfkit branch-protection setup [flags]
 
@@ -354,6 +399,8 @@ Flags:
   --repo      repository as owner/name
               (default $GITHUB_REPOSITORY, else gh repo view)
   --ruleset   ruleset name (default $RULESET_NAME, else "main-protection")
+  --contexts  comma-separated required status check contexts, trimmed per entry
+              (default $REQUIRED_CONTEXTS, else "Lint & Security,Test")
 `)
 	}
 	if err := flags.Parse(args); err != nil {
@@ -368,12 +415,13 @@ Flags:
 	}
 
 	if err := branchprotection.Setup(branchprotection.SetupOptions{
-		Repo:    *repo,
-		Ruleset: *ruleset,
-		GitHub:  newBranchProtectionGitHub(),
-		Git:     newBranchProtectionGit(),
-		Stdout:  stdout,
-		Stderr:  stderr,
+		Repo:     *repo,
+		Ruleset:  *ruleset,
+		Contexts: contexts.List(),
+		GitHub:   newBranchProtectionGitHub(),
+		Git:      newBranchProtectionGit(),
+		Stdout:   stdout,
+		Stderr:   stderr,
 	}); err != nil {
 		_, _ = fmt.Fprintf(stderr, "branch-protection setup: %v\n", err)
 		return exitFailure
