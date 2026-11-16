@@ -10,14 +10,19 @@ import (
 	"github.com/caberdo/terraform-provider-kit/internal/cli"
 )
 
-// readmeDoc is a README with a current floor block and prose on both sides.
+// readmeDoc is a README with a current badge pair and sentence pair, and prose
+// on both sides.
 const readmeDoc = "# terraform-provider-trino\n" +
+	"\n" +
+	"<!-- coverage-badge:start -->\n" +
+	"[![Coverage floor](https://img.shields.io/badge/coverage%20floor-80%25-green)](#testing-and-coverage)\n" +
+	"<!-- coverage-badge:end -->\n" +
 	"\n" +
 	"The contribution workflow is in CONTRIBUTING.md.\n" +
 	"\n" +
-	"<!-- coverage:start -->\n" +
-	"![Coverage floor](https://img.shields.io/badge/coverage%20floor-80%25-green)\n" +
+	"## Testing and coverage\n" +
 	"\n" +
+	"<!-- coverage:start -->\n" +
 	"The coverage gate fails below **80%** (`make coverage-gate`).\n" +
 	"<!-- coverage:end -->\n" +
 	"\n" +
@@ -164,7 +169,7 @@ func TestRunCoverageReadmeMissingMarkerExitsTwo(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2 (stderr = %q)", code, stderr.String())
 	}
-	for _, want := range []string{readme, "coverage:start", "coverage:end"} {
+	for _, want := range []string{readme, "coverage-badge:start", "coverage-badge:end"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
 		}
@@ -175,7 +180,11 @@ func TestRunCoverageReadmeMissingMarkerExitsTwo(t *testing.T) {
 }
 
 func TestRunCoverageReadmeReversedMarkersExitTwo(t *testing.T) {
-	reversed := "# Title\n\n<!-- coverage:end -->\nstale\n<!-- coverage:start -->\n"
+	reversed := "# Title\n\n<!-- coverage-badge:start -->\n" +
+		"[![Coverage floor](https://img.shields.io/badge/coverage%20floor-80%25-green)](#testing-and-coverage)\n" +
+		"<!-- coverage-badge:end -->\n" +
+		"\n" +
+		"<!-- coverage:end -->\nstale\n<!-- coverage:start -->\n"
 	readme := readmeFile(t, "README.md", reversed)
 	baseline := readmeFile(t, "coverage-baseline.txt", "80\n")
 
