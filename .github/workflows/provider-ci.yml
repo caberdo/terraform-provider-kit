@@ -22,6 +22,13 @@
 # `env.DOCS_ENABLED` instead of a job-level `if:`, so the job itself has no
 # `if:`.
 #
+# `vuln` must stay out of every `needs:` chain, for the same reason: a job that
+# needs `vuln` is skipped when the vulnerability scan fails, and a skipped
+# required check counts as a pass. `test` therefore needs only `lint` and
+# `coverage` only `test`, so a govulncheck finding cannot let a pull request
+# merge with the unit suite and the coverage gate never having run. `vuln` still
+# runs unconditionally, so it keeps its own required context.
+#
 # Every display name is static, without exception. A skipped job reports the raw
 # expression instead of an evaluated name (`ci / inputs.versions-job-name`), and
 # `tfkit branch-protection check` reads the raw `name:` from this file, so it
@@ -403,8 +410,9 @@ jobs:
           exit 1
 
   # The job always runs, even when the scan itself happens in `lint` (script)
-  # or nowhere (none): a skipped job skips everything that needs it, and `test`
-  # needs this job so the ordering gravitino already has is preserved.
+  # or nowhere (none). Nothing may put it in a `needs:` chain: a skipped job
+  # satisfies a required check, so a failing scan would otherwise skip `test`
+  # (and `coverage` with it) and still look green to the ruleset.
   vuln:
     name: Vulnerability Scan
     runs-on: ubuntu-latest
@@ -455,7 +463,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [lint, vuln]
+    needs: [lint]
     permissions:
       contents: read
     steps:
