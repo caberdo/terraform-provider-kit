@@ -16,6 +16,11 @@
 #
 # The caller must grant `actions: write` only if it relies on the log artifacts;
 # everything else runs with `contents: read`.
+# `env.TFKIT_VERSION` names the release of this workflow: when tagging vX, set
+# it to vX in the same commit. A reusable workflow ships inside its own tag, so
+# it can install the CLI it carries; an older pin would hand every caller of vX
+# the older behaviour.
+#
 name: Provider Acceptance
 
 on:
@@ -109,7 +114,7 @@ permissions:
 env:
   # `go run` rewrites a child's non-zero status to 1, so tfkit's exit codes
   # would be lost. The job installs the tool once and calls the binary.
-  TFKIT_VERSION: v0.9.0
+  TFKIT_VERSION: v0.13.0
   TFKIT: tfkit
   GOTOOLCHAIN: auto
 

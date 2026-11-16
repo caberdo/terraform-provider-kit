@@ -17,6 +17,11 @@
 # 0, which is indistinguishable from a match and would let this workflow close a
 # drift issue it never verified. The `soft` input below decides instead whether
 # exit 3 fails, so the status stays visible to every branch.
+# `env.TFKIT_VERSION` names the release of this workflow: when tagging vX, set
+# it to vX in the same commit. A reusable workflow ships inside its own tag, so
+# it can install the CLI it carries; an older pin would hand every caller of vX
+# the older behaviour.
+#
 name: Provider Protection
 
 on:
@@ -55,7 +60,7 @@ env:
   # exit 2 (configuration) and 3 (unreadable ruleset) into the drift status 1.
   # Install once and call the binary so the status reaches the branches below.
   # GOTOOLCHAIN=auto lets a caller with an older Go still build the kit.
-  TFKIT_VERSION: v0.9.0
+  TFKIT_VERSION: v0.13.0
   TFKIT: tfkit
   GOTOOLCHAIN: auto
 
