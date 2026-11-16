@@ -28,9 +28,9 @@ var ErrReadmeMarkers = errors.New("coverage markers are missing or malformed")
 var ErrReadmeStale = errors.New("README coverage block is out of date with the baseline")
 
 // RenderReadme returns doc with everything between the coverage markers replaced
-// by the floor block for baseline. The badge URL and the sentence match what
-// scripts/coverage-readme.sh writes today, except for the gate command, which
-// the caller supplies so the sentence can outlive that script.
+// by the floor block for baseline. The badge URL and the sentence match what the
+// `make coverage-readme` recipe writes, with the gate command supplied by the
+// caller so a provider can name its own target.
 //
 // Only the marker region changes: every line outside it is copied whole. The
 // result ends with a newline, as the awk script's `print` made it, so a README

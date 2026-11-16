@@ -18,7 +18,7 @@ const readmeDoc = "# terraform-provider-trino\n" +
 	"<!-- coverage:start -->\n" +
 	"![Coverage floor](https://img.shields.io/badge/coverage%20floor-80%25-green)\n" +
 	"\n" +
-	"The coverage gate fails below **80%** (`./scripts/coverage-gate.sh`).\n" +
+	"The coverage gate fails below **80%** (`make coverage-gate`).\n" +
 	"<!-- coverage:end -->\n" +
 	"\n" +
 	"## Verified unsupported\n" +
@@ -255,9 +255,32 @@ func TestRunCoverageReadmeMalformedBaselineExitsTwo(t *testing.T) {
 	}
 }
 
+func TestRunCoverageReadmeDefaultsTheGateCommand(t *testing.T) {
+	// The retired script's name is stale on its own: a README whose floor
+	// matches must still be rewritten to name the target the providers ship.
+	stale := strings.ReplaceAll(readmeDoc,
+		"(`make coverage-gate`)", "(`./scripts/coverage-gate.sh`)")
+	readme := readmeFile(t, "README.md", stale)
+	baseline := readmeFile(t, "coverage-baseline.txt", "80\n")
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{
+		"coverage", "readme",
+		"--readme", readme,
+		"--baseline", baseline,
+	}, testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr.String())
+	}
+	if got := readFile(t, readme); got != readmeDoc {
+		t.Errorf("README =\n%s\nwant the default gate command:\n%s", got, readmeDoc)
+	}
+}
+
 func TestRunCoverageReadmeHonoursTheGateCommand(t *testing.T) {
-	// Task 12 passes `make coverage-gate` so the sentence survives the script
-	// deletion; today the default keeps the block byte-identical.
+	// The default names `make coverage-gate`; the flag stays an override for a
+	// provider that enforces the floor some other way.
 	readme := readmeFile(t, "README.md", readmeDoc)
 	baseline := readmeFile(t, "coverage-baseline.txt", "80\n")
 
@@ -266,14 +289,14 @@ func TestRunCoverageReadmeHonoursTheGateCommand(t *testing.T) {
 		"coverage", "readme",
 		"--readme", readme,
 		"--baseline", baseline,
-		"--gate-command", "make coverage-gate",
+		"--gate-command", "make coverage-gate-strict",
 	}, testVersion, &stdout, &stderr)
 
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr.String())
 	}
 	want := strings.ReplaceAll(readmeDoc,
-		"(`./scripts/coverage-gate.sh`)", "(`make coverage-gate`)")
+		"(`make coverage-gate`)", "(`make coverage-gate-strict`)")
 	if got := readFile(t, readme); got != want {
 		t.Errorf("README =\n%s\nwant:\n%s", got, want)
 	}
