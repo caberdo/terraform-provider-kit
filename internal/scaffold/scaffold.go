@@ -4,11 +4,13 @@
 // The scaffold is the shape every caberdo provider repository shares: the
 // community files, the editor, ignore and lint configuration, and the workflow
 // callers. Render substitutes the provider-specific values; Check compares a
-// repository against the rendered files that must be identical.
+// repository against the rendered files that must be identical; Fix writes the
+// rendered enforced files over a drifting repository.
 //
 // Check is check-only by design: it never writes into the repository it reads,
-// so a drift run cannot turn a review finding into a silent edit. A `--fix`
-// mode belongs to a later change.
+// so a drift run cannot turn a review finding into a silent edit. Fix is the
+// separate, explicit repair: it writes only the enforced set and never touches
+// README prose or a provider's own files.
 package scaffold
 
 import (
@@ -338,6 +340,101 @@ func Check(root string, values map[string]string, opts Options) (Report, error) 
 		report.Problems = append(report.Problems, *problem)
 	}
 	return report, nil
+}
+
+// Fix writes the canonical content of every enforced file that is missing or
+// differs, and returns the repository-relative paths it wrote in check order.
+//
+// It honours the same allowances as Check: an allowed path is never written,
+// so a deliberate deviation survives a mechanical repair. A rendered file
+// outside the enforced set (README prose, AGENTS.md, provider-specific files)
+// is never a candidate: Fix repairs the contract, it does not copy the tree.
+//
+// The caller is expected to re-run Check afterwards; Fix reports what it did,
+// not whether the repository is now clean.
+func Fix(root string, values map[string]string, opts Options) ([]string, error) {
+	return fix(root, values, opts, true)
+}
+
+// FixPlan returns the paths Fix would write, in check order, without touching
+// the repository. It is the dry run behind `tfkit scaffold fix --dry-run`.
+func FixPlan(root string, values map[string]string, opts Options) ([]string, error) {
+	return fix(root, values, opts, false)
+}
+
+// fix is Fix and FixPlan with the write suppressed for the plan. It shares
+// rendering, enforcement and allowance validation with Check, so a path the
+// check reports is exactly a path the repair targets.
+func fix(root string, values map[string]string, opts Options, apply bool) ([]string, error) {
+	rendered, err := renderFS(assets.FS, values)
+	if err != nil {
+		return nil, err
+	}
+
+	checked, err := enforcedPaths(rendered)
+	if err != nil {
+		return nil, err
+	}
+
+	allow, err := normalizeAllowances(opts.Allow, checked)
+	if err != nil {
+		return nil, err
+	}
+
+	enforcedSet := make(map[string]struct{}, len(checked))
+	for _, rel := range checked {
+		enforcedSet[rel] = struct{}{}
+	}
+
+	var written []string
+	for _, rel := range checked {
+		if _, allowed := allow[rel]; allowed {
+			continue
+		}
+		// A rendered path outside the enforced set must never be written. The
+		// loop already ranges over the enforced list; the guard keeps a future
+		// refactor from turning Fix into a tree copy.
+		if !contains(enforcedSet, rel) {
+			return nil, fmt.Errorf("refuse to write %s: not an enforced path", rel)
+		}
+
+		problem, err := compare(root, rel, rendered[rel])
+		if err != nil {
+			return nil, err
+		}
+		if problem == nil {
+			continue
+		}
+		if apply {
+			if err := writeCanonical(root, rel, rendered[rel]); err != nil {
+				return nil, err
+			}
+		}
+		written = append(written, rel)
+	}
+	return written, nil
+}
+
+// writeCanonical replaces one enforced file. A path that exists but is not a
+// regular file is refused rather than followed or replaced: a symlink may point
+// outside the repository, and a directory is not a drifting file.
+func writeCanonical(root, rel string, content []byte) error {
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	info, err := os.Lstat(full)
+	switch {
+	case err == nil && !info.Mode().IsRegular():
+		return fmt.Errorf("refuse to overwrite %s: not a regular file", rel)
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("%s: %w", rel, err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return fmt.Errorf("%s: %w", rel, err)
+	}
+	if err := os.WriteFile(full, content, 0o644); err != nil {
+		return fmt.Errorf("%s: %w", rel, err)
+	}
+	return nil
 }
 
 // enforcedPaths returns the literal list plus the issue templates the scaffold

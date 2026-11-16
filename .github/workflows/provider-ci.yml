@@ -13,6 +13,7 @@
 #   mdvalidate        Validate Markdown Files
 #   dependency-review Dependency Review
 #   versions          Supported Versions
+#   scaffold          Scaffold
 #
 # Do not rename a job or a display name: several rulesets require these
 # contexts. Additive jobs (coverage, mdvalidate, versions) report as *skipped*
@@ -266,6 +267,26 @@ on:
         required: false
         type: string
         default: ""
+      scaffold:
+        description: "Run the scaffold drift check (opt-in; a skipped job satisfies a required check)"
+        required: false
+        type: boolean
+        default: false
+      scaffold-strict:
+        description: "Fail the Scaffold job on drift; false only reports it while a repository adopts the check"
+        required: false
+        type: boolean
+        default: true
+      scaffold-upstream:
+        description: "Upstream repository as owner/name; required when scaffold is true"
+        required: false
+        type: string
+        default: ""
+      scaffold-license:
+        description: "SPDX licence identifier the scaffold documents state"
+        required: false
+        type: string
+        default: "MIT"
 
 permissions:
   contents: read
@@ -837,3 +858,85 @@ jobs:
           latest="${all[${#all[@]}-1]}"
           echo "list=$list" >> "$GITHUB_OUTPUT"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
+
+  # Opt-in: the job is skipped unless a caller sets `scaffold: true`, and a
+  # skipped job satisfies a required check. It therefore must not be added to a
+  # ruleset until every caller opts in; a repository adopts it with
+  # `scaffold-strict: false`, records its deliberate deviations in
+  # `.github/scaffold-allow.txt`, then flips strict on.
+  scaffold:
+    name: Scaffold
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: inputs.scaffold
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: Install tfkit
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/caberdo/terraform-provider-kit/cmd/tfkit@${{ env.TFKIT_VERSION }}
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # The check reads `.github/scaffold-allow.txt` itself when the repository
+      # has one, so the durable exemptions need no command-line wiring.
+      - name: Check the repository scaffold
+        env:
+          SCAFFOLD_STRICT: ${{ inputs.scaffold-strict }}
+          SCAFFOLD_UPSTREAM: ${{ inputs.scaffold-upstream }}
+          SCAFFOLD_LICENSE: ${{ inputs.scaffold-license }}
+        run: |
+          set -uo pipefail
+          if [ -z "$SCAFFOLD_UPSTREAM" ]; then
+            echo "scaffold-upstream is required when scaffold: true" >&2
+            exit 2
+          fi
+          product="${{ inputs.provider-display }}"
+          if [ -z "$product" ]; then
+            product="${{ inputs.provider }}"
+          fi
+          args=(
+            scaffold check
+            --provider "${{ inputs.provider }}"
+            --product "$product"
+            --module "${{ inputs.module }}"
+            --packages "${{ inputs.packages }}"
+            --year "$(date -u +%Y)"
+            --copyright "${{ github.repository_owner }}"
+            --kit-version "$TFKIT_VERSION"
+            --upstream "$SCAFFOLD_UPSTREAM"
+            --license "$SCAFFOLD_LICENSE"
+          )
+          if [ -n "${{ inputs.versions-file }}" ]; then
+            args+=(--versions-file "${{ inputs.versions-file }}")
+          fi
+
+          set +e
+          tfkit "${args[@]}" 2>&1 | tee scaffold-check.txt
+          status=${PIPESTATUS[0]}
+          set -e
+          {
+            echo "## Scaffold"
+            echo '```'
+            cat scaffold-check.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # A configuration problem (2) is not drift and never passes.
+          if [ "$status" -eq 2 ]; then
+            exit 2
+          fi
+          if [ "$status" -ne 0 ] && [ "$SCAFFOLD_STRICT" != "true" ]; then
+            echo "Scaffold drift reported; scaffold-strict is false, so the job passes." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          exit "$status"

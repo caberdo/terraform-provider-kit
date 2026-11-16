@@ -53,6 +53,39 @@ func TestParseRemoteRequiresGitHub(t *testing.T) {
 	}
 }
 
+func TestParseAllowFileIgnoresCommentsAndBlankLines(t *testing.T) {
+	entries, err := parseAllowFile("# durable deviations\n\n.editorconfig: the organisation's editor standard\n   \n")
+	if err != nil {
+		t.Fatalf("parseAllowFile: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %+v, want one", entries)
+	}
+	if entries[0].Path != ".editorconfig" || entries[0].Reason != "the organisation's editor standard" {
+		t.Errorf("entry = %+v, want the parsed path and reason", entries[0])
+	}
+}
+
+func TestParseAllowFileRejectsAMissingReason(t *testing.T) {
+	_, err := parseAllowFile(".editorconfig:\n")
+	if err == nil {
+		t.Fatal("parseAllowFile accepted a line without a reason, want an error")
+	}
+	if !strings.Contains(err.Error(), "reason") {
+		t.Errorf("error = %q, want it to name the missing reason", err)
+	}
+}
+
+func TestParseAllowFileRejectsAPathWithoutASeparator(t *testing.T) {
+	_, err := parseAllowFile("README.md our reason\n")
+	if err == nil {
+		t.Fatal("parseAllowFile accepted a line without a colon, want an error")
+	}
+	if !strings.Contains(err.Error(), "<path>:<reason>") {
+		t.Errorf("error = %q, want the expected grammar", err)
+	}
+}
+
 func TestPackagePatternFromMakefile(t *testing.T) {
 	cases := map[string]string{
 		"go test -v -cover ./...\n": "./...",

@@ -2,12 +2,14 @@ package scaffold_test
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"go/format"
 	"go/parser"
 	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -710,6 +712,140 @@ func TestCheckRejectsANonRegularEnforcedPath(t *testing.T) {
 	problem := problemFor(report, "SUPPORT.md")
 	if problem == nil || problem.Kind != scaffold.Missing {
 		t.Fatalf("problem = %+v, want a missing SUPPORT.md", problem)
+	}
+}
+
+// fileDigest is the content hash of one file, so a test can prove byte
+// equality without depending on the file's path or mode.
+func fileDigest(t *testing.T, path string) [sha256.Size]byte {
+	t.Helper()
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return sha256.Sum256(content)
+}
+
+// TestFixWritesOnlyEnforcedFiles proves --fix is a repair of the enforced set,
+// not a copy of the rendered tree: README prose and provider-specific files stay
+// exactly as they are.
+func TestFixWritesOnlyEnforcedFiles(t *testing.T) {
+	dir := aligned(t, "trino", trinoValues())
+
+	for path, addition := range map[string]string{
+		".editorconfig": "\n# local editor preference\n",
+		".gitignore":    "\n# local ignore\n",
+	} {
+		content, err := os.ReadFile(filepath.Join(dir, path))
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, path), append(content, []byte(addition)...), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	if err := os.Remove(filepath.Join(dir, "SUPPORT.md")); err != nil {
+		t.Fatalf("remove SUPPORT.md: %v", err)
+	}
+
+	// Both are scaffold files the check deliberately leaves unenforced.
+	readme := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readme, []byte("# provider-owned prose\n"), 0o644); err != nil {
+		t.Fatalf("write README.md: %v", err)
+	}
+	main := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(main, []byte("package main // provider-owned\n"), 0o644); err != nil {
+		t.Fatalf("write main.go: %v", err)
+	}
+	readmeDigest := fileDigest(t, readme)
+	mainDigest := fileDigest(t, main)
+
+	written, err := scaffold.Fix(dir, trinoValues(), scaffold.Options{})
+	if err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if got, want := written, []string{".editorconfig", ".gitignore", "SUPPORT.md"}; !slices.Equal(got, want) {
+		t.Errorf("Fix wrote %q, want %q", got, want)
+	}
+
+	report, err := scaffold.Check(dir, trinoValues(), scaffold.Options{})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !report.OK() {
+		t.Errorf("Problems after Fix = %v, want none", report.Problems)
+	}
+	if got := fileDigest(t, readme); got != readmeDigest {
+		t.Error("Fix overwrote README.md, which is not in the enforced set")
+	}
+	if got := fileDigest(t, main); got != mainDigest {
+		t.Error("Fix overwrote main.go, which is not in the enforced set")
+	}
+}
+
+// TestFixHonoursAllow proves an allowed path is never written, so a deliberate
+// deviation survives a mechanical repair.
+func TestFixHonoursAllow(t *testing.T) {
+	dir := aligned(t, "trino", trinoValues())
+	for path, addition := range map[string]string{
+		".editorconfig": "\n# local editor preference\n",
+		".gitignore":    "\n# local ignore\n",
+	} {
+		content, err := os.ReadFile(filepath.Join(dir, path))
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, path), append(content, []byte(addition)...), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	written, err := scaffold.Fix(dir, trinoValues(), scaffold.Options{
+		Allow: []scaffold.Allowance{{Path: ".editorconfig", Reason: "the organisation's editor standard"}},
+	})
+	if err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if got, want := written, []string{".gitignore"}; !slices.Equal(got, want) {
+		t.Errorf("Fix wrote %q, want %q", got, want)
+	}
+	if _, err := os.ReadFile(filepath.Join(dir, ".editorconfig")); err != nil {
+		t.Fatalf("read .editorconfig: %v", err)
+	}
+	report, err := scaffold.Check(dir, trinoValues(), scaffold.Options{
+		Allow: []scaffold.Allowance{{Path: ".editorconfig", Reason: "the organisation's editor standard"}},
+	})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !report.OK() {
+		t.Errorf("Problems = %v, want only the allowed .editorconfig deviation", report.Problems)
+	}
+	if !report.Allowed[0].Used {
+		t.Error("the .editorconfig allowance did not suppress the deviation Fix left in place")
+	}
+}
+
+// TestFixPlanChangesNothing proves the dry run reports the same work without
+// touching a byte.
+func TestFixPlanChangesNothing(t *testing.T) {
+	dir := aligned(t, "trino", trinoValues())
+	path := filepath.Join(dir, ".editorconfig")
+	if err := os.WriteFile(path, []byte("local\n"), 0o644); err != nil {
+		t.Fatalf("write .editorconfig: %v", err)
+	}
+	before := fileDigest(t, path)
+
+	planned, err := scaffold.FixPlan(dir, trinoValues(), scaffold.Options{})
+	if err != nil {
+		t.Fatalf("FixPlan: %v", err)
+	}
+	if got, want := planned, []string{".editorconfig"}; !slices.Equal(got, want) {
+		t.Errorf("FixPlan = %q, want %q", got, want)
+	}
+	if got := fileDigest(t, path); got != before {
+		t.Error("FixPlan wrote .editorconfig; a dry run must change nothing")
 	}
 }
 
