@@ -168,20 +168,34 @@ jobs:
       max-parallel: ${{ inputs.max-parallel }}
       matrix:
         version: ${{ fromJSON(needs.prepare.outputs.list) }}
-    # A job-level `env:` key cannot be an expression, so every provider variable
-    # is declared and the four that do not apply are empty: the acceptance
-    # suites never read a variable they did not ask for.
-    env:
-      TRINO_VERSION: ${{ inputs.version-env == 'TRINO_VERSION' && matrix.version || '' }}
-      GRAVITINO_VERSION: ${{ inputs.version-env == 'GRAVITINO_VERSION' && matrix.version || '' }}
-      AGENTGATEWAY_VERSION: ${{ inputs.version-env == 'AGENTGATEWAY_VERSION' && matrix.version || '' }}
-      OPENMETADATA_VERSION: ${{ inputs.version-env == 'OPENMETADATA_VERSION' && matrix.version || '' }}
-      RUSTFS_VERSION: ${{ inputs.version-env == 'RUSTFS_VERSION' && matrix.version || '' }}
-      TRINO_EXPECT_VERSION: ${{ inputs.expect-version-env == 'TRINO_EXPECT_VERSION' && matrix.version || '' }}
-      AGENTGATEWAY_EXPECT_VERSION: ${{ inputs.expect-version-env == 'AGENTGATEWAY_EXPECT_VERSION' && matrix.version || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # A job-level `env:` key cannot be an expression, so the caller names the
+      # variable and this step exports it for every following step, including
+      # the compose command. The caller-supplied name is validated rather than
+      # interpolated blindly; an empty expect-version-env disables the second
+      # variable, which is how rustfs, gravitino and openmetadata run today.
+      - name: Export the matrix version
+        env:
+          VERSION_ENV: ${{ inputs.version-env }}
+          EXPECT_VERSION_ENV: ${{ inputs.expect-version-env }}
+          MATRIX_VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION_ENV" =~ ^[A-Z_][A-Z0-9_]*$ ]]; then
+            echo "version-env must be an uppercase environment name, got '$VERSION_ENV'" >&2
+            exit 1
+          fi
+          echo "${VERSION_ENV}=${MATRIX_VERSION}" >> "$GITHUB_ENV"
+          if [[ -n "$EXPECT_VERSION_ENV" ]]; then
+            if [[ ! "$EXPECT_VERSION_ENV" =~ ^[A-Z_][A-Z0-9_]*$ ]]; then
+              echo "expect-version-env must be an uppercase environment name, got '$EXPECT_VERSION_ENV'" >&2
+              exit 1
+            fi
+            echo "${EXPECT_VERSION_ENV}=${MATRIX_VERSION}" >> "$GITHUB_ENV"
+          fi
 
       # One compose project per version so matrices cannot share containers,
       # volumes or port bindings. The name is assembled in shell because a

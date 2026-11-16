@@ -1,0 +1,79 @@
+# Releasing is delegated to the reusable release workflow in
+# caberdo/terraform-provider-kit.
+#
+# Two entry points share this workflow:
+#
+# - A push to `main` that changes `VERSION`. This is how merging the release
+#   pull request ships the version it prepared. The `paths: [VERSION]` filter
+#   cannot be combined with the `tags: ["v*"]` trigger below, so the reusable
+#   workflow reproduces it as a job guard over the pushed range.
+# - A `workflow_dispatch`, for the first tag of a new line, a re-tag after a
+#   failure that happened before the tag was pushed, and a maintainer who needs
+#   to choose the version explicitly.
+#
+# `push: tags: ["v*"]` stays for signed tags pushed from a developer machine:
+# tags pushed with the default GITHUB_TOKEN do not trigger other workflows, so
+# the tag job hands its own tag to the release job instead of relying on it.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (leave empty to auto-calculate from release_type; a push to main always uses VERSION)"
+        required: false
+        type: string
+        default: ""
+      release_type:
+        description: "Type of release (used when version is empty)"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: "patch"
+      tag:
+        description: "Existing tag to publish (or republish), e.g. v0.9.0"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# Only a `VERSION` change (or a dispatch) starts a release, but a manual
+# dispatch can race a merge. Serialise them instead of cancelling, so a
+# half-created tag is never abandoned.
+concurrency:
+  group: create-release-tag
+  cancel-in-progress: false
+
+jobs:
+  release:
+    uses: caberdo/terraform-provider-kit/.github/workflows/provider-release.yml@{{KIT_VERSION}}
+    # `contents: write` creates the tag and uploads the release; `id-token:
+    # write` mints the OIDC identity `actions/attest` signs the provenance
+    # with; `attestations: write` stores that provenance in the repository's
+    # attestation record. Nothing else needs write access.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    secrets: inherit
+    with:
+      provider: {{PROVIDER}}
+      dist-prefix: terraform-provider-{{PROVIDER}}
+      version-file: VERSION
+      # The changelog is the only place a release is documented: refuse to ship
+      # a version nobody wrote down.
+      changelog-check: true
+      # A re-run, or a dispatch for an already released version, must not fail:
+      # an existing tag on the same commit means the release already happened.
+      tag-exists: skip
+      version: ${{ github.event.inputs.version }}
+      release-type: ${{ github.event.inputs.release_type || 'patch' }}
+      tag: ${{ github.event.inputs.tag }}
