@@ -35,6 +35,7 @@ Commands:
   examples  Validate the Terraform examples of a provider.
   branch-protection  Check or install a repository's branch ruleset.
   release   Check a provider's release metadata.
+  scaffold  Compare a provider repository against the canonical scaffold.
 
 Run "tfkit <command> -h" for more about a command.
 `
@@ -93,6 +94,19 @@ Commands:
 Run "tfkit release <command> -h" for more about a command.
 `
 
+// scaffoldUsage is printed when `tfkit scaffold` has no usable subcommand.
+const scaffoldUsage = `Usage:
+  tfkit scaffold check [flags]
+
+Commands:
+  check  Verify that this repository still matches the canonical scaffold.
+
+The provider and module are derived from the repository when their flags are
+omitted. A deliberate deviation is recorded with --allow <path>:<reason>.
+
+Run "tfkit scaffold <command> -h" for more about a command.
+`
+
 // Exit codes returned by Run.
 const (
 	exitOK      = 0
@@ -125,6 +139,8 @@ func Run(args []string, version string, stdout, stderr io.Writer) int {
 		return runBranchProtection(args[1:], stdout, stderr)
 	case "release":
 		return runRelease(args[1:], stdout, stderr)
+	case "scaffold":
+		return runScaffold(args[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		printUsage(stderr)
