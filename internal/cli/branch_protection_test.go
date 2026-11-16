@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,8 +14,9 @@ import (
 
 const cliTestVersion = "v0.1.0-test"
 
-// cliRulesetJSON is a ruleset the policy accepts.
-const cliRulesetJSON = `{
+// cliRulesetTemplate is a ruleset the policy accepts; the placeholder holds the
+// required_status_checks entries.
+const cliRulesetTemplate = `{
   "enforcement": "active",
   "bypass_actors": [],
   "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
@@ -25,11 +27,23 @@ const cliRulesetJSON = `{
     {"type": "pull_request", "parameters": {"required_review_thread_resolution": true}},
     {"type": "required_status_checks", "parameters": {
       "strict_required_status_checks_policy": true,
-      "required_status_checks": [{"context": "Lint & Security"}, {"context": "Test"}]
+      "required_status_checks": [%s]
     }},
     {"type": "merge_queue", "parameters": {"merge_method": "SQUASH"}}
   ]
 }`
+
+// cliRulesetJSON is a ruleset that requires the two default contexts.
+var cliRulesetJSON = cliRulesetWithContexts("Lint & Security", "Test")
+
+// cliRulesetWithContexts builds a ruleset that requires exactly contexts.
+func cliRulesetWithContexts(contexts ...string) string {
+	checks := make([]string, 0, len(contexts))
+	for _, context := range contexts {
+		checks = append(checks, fmt.Sprintf(`{"context": %q}`, context))
+	}
+	return fmt.Sprintf(cliRulesetTemplate, strings.Join(checks, ", "))
+}
 
 // cliGitHubResponse is one canned gh invocation. The first entry whose match is
 // a substring of the joined arguments wins.
@@ -109,6 +123,33 @@ jobs:
 	}
 	return root
 }
+
+// cliContextsRoot writes a checkout whose pull_request workflow reports
+// exactly contexts, so a flag can be checked against job names other than the
+// two defaults.
+func cliContextsRoot(t *testing.T, contexts ...string) string {
+	t.Helper()
+
+	var workflow strings.Builder
+	workflow.WriteString("name: CI\non:\n  pull_request:\njobs:\n")
+	for i, context := range contexts {
+		fmt.Fprintf(&workflow, "  job%d:\n    name: %q\n", i, context)
+	}
+
+	root := t.TempDir()
+	path := filepath.Join(root, ".github", "workflows", "ci.yml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(workflow.String()), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	return root
+}
+
+// cliMigratedContexts are the contexts a provider reports after moving to the
+// reusable ci workflow: the caller prefix and a slash.
+var cliMigratedContexts = []string{"ci / Lint & Security", "ci / Test"}
 
 // runBranchProtectionCLI invokes the command with the fixture checkout wired
 // in and returns the exit code and both streams.
@@ -274,5 +315,106 @@ func TestRunBranchProtectionHelpExitsZero(t *testing.T) {
 				t.Errorf("stderr = %q, want it to document the checkout-root discovery", stderr)
 			}
 		})
+	}
+}
+
+func TestRunBranchProtectionCheckTrimsTheContextsFlag(t *testing.T) {
+	// The migrated contexts carry spaces and a slash. The flag's entries are
+	// trimmed, so the surrounding spaces the shell hands over are not part of
+	// the names.
+	gh := &cliFakeGitHub{responses: []cliGitHubResponse{
+		{match: "repos/o/r/rulesets/7", stdout: cliRulesetWithContexts(cliMigratedContexts...)},
+		{match: "repos/o/r/rulesets", stdout: `[{"id": 7, "name": "main-protection"}]`},
+	}}
+	stubBranchProtectionSeams(t, gh, cliFakeGit{root: cliContextsRoot(t, cliMigratedContexts...)})
+
+	code, _, stderr := runBranchProtectionCLI(t,
+		"branch-protection", "check", "--repo", "o/r",
+		"--contexts", " ci / Lint & Security , ci / Test ")
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr)
+	}
+}
+
+func TestRunBranchProtectionCheckContextsFlagOverridesTheEnvironment(t *testing.T) {
+	// REQUIRED_CONTEXTS names the pre-migration contexts, which this checkout
+	// no longer reports; only the flag's list can match.
+	t.Setenv("REQUIRED_CONTEXTS", "Lint & Security,Test")
+
+	gh := &cliFakeGitHub{responses: []cliGitHubResponse{
+		{match: "repos/o/r/rulesets/7", stdout: cliRulesetWithContexts(cliMigratedContexts...)},
+		{match: "repos/o/r/rulesets", stdout: `[{"id": 7, "name": "main-protection"}]`},
+	}}
+	stubBranchProtectionSeams(t, gh, cliFakeGit{root: cliContextsRoot(t, cliMigratedContexts...)})
+
+	code, _, stderr := runBranchProtectionCLI(t,
+		"branch-protection", "check", "--repo", "o/r",
+		"--contexts", strings.Join(cliMigratedContexts, ","))
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0: the flag must win over REQUIRED_CONTEXTS (stderr = %q)", code, stderr)
+	}
+}
+
+func TestRunBranchProtectionCheckRejectsAnEmptyContext(t *testing.T) {
+	for _, value := range []string{
+		"Lint & Security,,Test",
+		"Lint & Security,",
+		"Lint & Security, ,Test",
+		"",
+	} {
+		t.Run(value, func(t *testing.T) {
+			stubBranchProtectionSeams(t, &cliFakeGitHub{}, cliFakeGit{root: cliPolicyRoot(t)})
+
+			code, _, stderr := runBranchProtectionCLI(t,
+				"branch-protection", "check", "--repo", "o/r", "--contexts", value)
+
+			if code != 2 {
+				t.Fatalf("exit = %d, want 2 (stderr = %q)", code, stderr)
+			}
+			if !strings.Contains(stderr, "empty entry") {
+				t.Errorf("stderr = %q, want the empty-entry usage error", stderr)
+			}
+			if !strings.Contains(stderr, "usage: tfkit branch-protection check") {
+				t.Errorf("stderr = %q, want the usage text", stderr)
+			}
+		})
+	}
+}
+
+func TestRunBranchProtectionSetupAcceptsTheContextsFlag(t *testing.T) {
+	gh := &cliFakeGitHub{responses: []cliGitHubResponse{
+		{match: "repos/o/r/rulesets --input -", stdout: `{"id": 7}`},
+		{match: "repos/o/r/rulesets", stdout: "[]"},
+		{match: "repos/o/r", stdout: `{"permissions": {"admin": true}}`},
+	}}
+	stubBranchProtectionSeams(t, gh, cliFakeGit{root: cliContextsRoot(t, cliMigratedContexts...)})
+
+	code, stdout, stderr := runBranchProtectionCLI(t,
+		"branch-protection", "setup", "--repo", "o/r",
+		"--contexts", strings.Join(cliMigratedContexts, ","))
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr)
+	}
+	want := "created ruleset main-protection on o/r with contexts: " +
+		strings.Join(cliMigratedContexts, ", ") + "\n"
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestRunBranchProtectionSetupRejectsAnEmptyContext(t *testing.T) {
+	stubBranchProtectionSeams(t, &cliFakeGitHub{}, cliFakeGit{root: cliContextsRoot(t, cliMigratedContexts...)})
+
+	code, _, stderr := runBranchProtectionCLI(t,
+		"branch-protection", "setup", "--repo", "o/r", "--contexts", "ci / Test,")
+
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (stderr = %q)", code, stderr)
+	}
+	if !strings.Contains(stderr, "empty entry") {
+		t.Errorf("stderr = %q, want the empty-entry usage error", stderr)
 	}
 }

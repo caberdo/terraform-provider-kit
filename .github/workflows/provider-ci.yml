@@ -260,7 +260,7 @@ permissions:
   contents: read
 
 env:
-  TFKIT: go run github.com/caberdo/terraform-provider-kit/cmd/tfkit@v0.1.0
+  TFKIT: go run github.com/caberdo/terraform-provider-kit/cmd/tfkit@v0.3.0
 
 jobs:
   lint:

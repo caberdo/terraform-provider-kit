@@ -37,6 +37,11 @@ on:
         required: false
         type: string
         default: "ci"
+      required-contexts:
+        description: "Comma-separated required status check contexts (empty uses the tfkit default)"
+        required: false
+        type: string
+        default: ""
     secrets:
       BRANCH_PROTECTION_TOKEN:
         description: "Token with administration read, so the rulesets API is readable"
@@ -46,7 +51,7 @@ permissions:
   contents: read
 
 env:
-  TFKIT: go run github.com/caberdo/terraform-provider-kit/cmd/tfkit@v0.1.0
+  TFKIT: go run github.com/caberdo/terraform-provider-kit/cmd/tfkit@v0.3.0
 
 jobs:
   drift:
@@ -69,9 +74,14 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.BRANCH_PROTECTION_TOKEN || github.token }}
+          REQUIRED_CONTEXTS_INPUT: ${{ inputs.required-contexts }}
         run: |
           set +e
-          ${{ env.TFKIT }} branch-protection check --repo "$GITHUB_REPOSITORY" > drift.txt 2>&1
+          contexts=()
+          if [ -n "$REQUIRED_CONTEXTS_INPUT" ]; then
+            contexts=(--contexts "$REQUIRED_CONTEXTS_INPUT")
+          fi
+          ${{ env.TFKIT }} branch-protection check --repo "$GITHUB_REPOSITORY" "${contexts[@]}" > drift.txt 2>&1
           code=$?
           set -e
           cat drift.txt
