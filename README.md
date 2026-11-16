@@ -62,7 +62,7 @@ The kit owns the canonical repository scaffold; `tfkit scaffold check` reports w
    ```bash
    tfkit scaffold fix --dry-run \
      --product Trino --year 2026 --copyright "Dennis de Jong" \
-     --kit-version v0.11.0 --upstream trinodb/trino
+     --kit-version v0.12.0 --upstream trinodb/trino
    ```
 
    The dry run prints every path it would write and changes nothing. Only the enforced set is written: the community files, the editor/ignore/lint configuration and the issue templates. README prose, `AGENTS.md` and provider-specific files are never touched. A repository that already ships `.yml` issue forms is checked and repaired as `.yml`; `fix` does not add competing `.md` siblings.
@@ -75,14 +75,14 @@ The kit owns the canonical repository scaffold; `tfkit scaffold check` reports w
    tfkit scaffold check …  # exit 0 clean, 1 drift, 2 configuration problem
    ```
 
-   Review the diff, not just the exit code. If a file's prose carries a provider-specific answer (a security contact, a support route, an authentication prompt), restore that answer and record the path in the allow list rather than accepting the generic text. A repository with substantial provider-specific prose should expect to allow-list roughly 8–11 of the 14 enforced paths.
+   Review the diff, not just the exit code. If a file's prose carries a provider-specific answer (a security contact, a support route, an authentication prompt), restore that answer and record the path in the allow list rather than accepting the generic text. A repository with substantial provider-specific prose should expect to allow-list roughly 8–11 of the 13 enforced paths.
 
-4. **Commit the result and enable the job in report-only mode.** The caller's `uses:` pin must move to the release that carries the `scaffold` job (v0.11.0 or later); an older pin has no such job:
+4. **Commit the result and enable the job in report-only mode.** The caller's `uses:` pin must move to the release that carries the `scaffold` job (v0.12.0 or later); an older pin has no such job:
 
    ```yaml
    jobs:
      ci:
-       uses: caberdo/terraform-provider-kit/.github/workflows/provider-ci.yml@v0.11.0
+       uses: caberdo/terraform-provider-kit/.github/workflows/provider-ci.yml@v0.12.0
        with:
          scaffold: true
          scaffold-strict: false

@@ -1,7 +1,10 @@
 package cli_test
 
 import (
+	"context"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -20,8 +23,16 @@ type calledWorkflow struct {
 		} `yaml:"workflow_call"`
 	} `yaml:"on"`
 	Jobs map[string]struct {
-		Name string `yaml:"name"`
-		If   string `yaml:"if"`
+		Name        string `yaml:"name"`
+		If          string `yaml:"if"`
+		Concurrency struct {
+			Group            string `yaml:"group"`
+			CancelInProgress bool   `yaml:"cancel-in-progress"`
+		} `yaml:"concurrency"`
+		Steps []struct {
+			Name string `yaml:"name"`
+			Run  string `yaml:"run"`
+		} `yaml:"steps"`
 	} `yaml:"jobs"`
 }
 
@@ -66,6 +77,87 @@ func TestProviderCIDeclaresTheChangelogFragmentJob(t *testing.T) {
 	}
 	if !strings.Contains(job.If, "github.event_name == 'pull_request'") {
 		t.Errorf("job changelog if = %q, want it gated on a pull request", job.If)
+	}
+}
+
+// TestProviderCIChangelogJobKeepsItsExemptions pins the exemptions rustfs
+// already implements. A change that no fragment describes must pass, so the
+// path filter has to cover Go code, workflows, docs and examples only.
+func TestProviderCIChangelogJobKeepsItsExemptions(t *testing.T) {
+	job, ok := readWorkflow(t, "provider-ci.yml").Jobs["changelog"]
+	if !ok {
+		t.Fatal("job changelog is not declared")
+	}
+
+	var script strings.Builder
+	for _, step := range job.Steps {
+		script.WriteString(step.Run)
+	}
+	run := script.String()
+
+	for _, want := range []string{
+		"release/*",
+		"skip-changelog",
+		`\.go`,
+		"go.mod",
+		".github/",
+		"docs/",
+		"examples/",
+	} {
+		if !strings.Contains(run, want) {
+			t.Errorf("changelog job does not mention %q; the path filter and exemptions must stay", want)
+		}
+	}
+}
+
+// TestProviderCIChangelogJobRestoresTheConcurrencyGroup keeps the group rustfs's
+// own job carried: a superseded pull request run must not keep checking a
+// fragment nobody will merge.
+func TestProviderCIChangelogJobRestoresTheConcurrencyGroup(t *testing.T) {
+	job, ok := readWorkflow(t, "provider-ci.yml").Jobs["changelog"]
+	if !ok {
+		t.Fatal("job changelog is not declared")
+	}
+	if got, want := job.Concurrency.Group, "${{ github.workflow }}-${{ github.event.pull_request.number }}"; got != want {
+		t.Errorf("changelog concurrency group = %q, want %q", got, want)
+	}
+	if !job.Concurrency.CancelInProgress {
+		t.Error("changelog concurrency does not cancel in progress")
+	}
+}
+
+// TestSelfCITfkitGuardRequiresTheReleaseCheckDefault proves the guard checks
+// the release check's behaviour, not only that the command exists. A pin whose
+// help never mentions the tag relationship predates the changelog-based
+// default, and every provider on that pin still compares against the last tag.
+func TestSelfCITfkitGuardRequiresTheReleaseCheckDefault(t *testing.T) {
+	guard := filepath.Join("..", "..", "scripts", "check-tfkit-commands.sh")
+	bin := filepath.Join(t.TempDir(), "tfkit")
+	fake := `#!/bin/sh
+if [ "$1" = "release" ] && [ "$2" = "check" ] && [ "$3" = "--help" ]; then
+  echo "usage: tfkit release check [flags]"
+  echo "  --version-file  path of the file holding the version"
+  exit 0
+fi
+cat <<'EOF'
+Commands:
+  coverage   Merge and gate coverage, render the README.
+  examples   Validate examples.
+  branch-protection  Check and set branch protection.
+  release    Check a provider's release metadata.
+  scaffold   Check the repository scaffold.
+EOF
+`
+	if err := os.WriteFile(bin, []byte(fake), 0o755); err != nil {
+		t.Fatalf("write fake tfkit: %v", err)
+	}
+
+	output, err := exec.CommandContext(context.Background(), "bash", guard, bin, "v0.9.0").CombinedOutput()
+	if err == nil {
+		t.Fatalf("the guard accepted a tfkit whose release check help omits the tag (output = %q)", output)
+	}
+	if !strings.Contains(string(output), "release check --help") {
+		t.Errorf("output = %q, want it to name the release check help check", output)
 	}
 }
 

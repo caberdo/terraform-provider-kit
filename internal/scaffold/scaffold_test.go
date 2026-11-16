@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -16,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/caberdo/terraform-provider-kit/internal/coverage"
+	"github.com/caberdo/terraform-provider-kit/internal/release"
 	"github.com/caberdo/terraform-provider-kit/internal/scaffold"
 	assets "github.com/caberdo/terraform-provider-kit/scaffold"
 )
@@ -87,7 +89,6 @@ var enforced = []string{
 	".github/CODEOWNERS",
 	".github/dependabot.yml",
 	".github/PULL_REQUEST_TEMPLATE.md",
-	"changelog.d/README.md",
 	"changelog.d/.gitkeep",
 	".github/ISSUE_TEMPLATE/bug_report.md",
 	".github/ISSUE_TEMPLATE/feature_request.md",
@@ -1070,7 +1071,8 @@ func TestReportOK(t *testing.T) {
 
 // TestRenderRetiresTheVersionFileAndShipsTheFragmentDirectory pins the two
 // release decisions: the version is the last tag, so no file carries it, and
-// every repository has the changelog.d/ convention.
+// every repository has the changelog.d/ convention plus the assembler its CI
+// message names.
 func TestRenderRetiresTheVersionFileAndShipsTheFragmentDirectory(t *testing.T) {
 	rendered, err := scaffold.Render(scaffoldDir, trinoValues())
 	if err != nil {
@@ -1093,6 +1095,7 @@ func TestRenderRetiresTheVersionFileAndShipsTheFragmentDirectory(t *testing.T) {
 		"bugfix",
 		"security",
 		"chore",
+		"make changelog-release",
 	} {
 		if !strings.Contains(string(readme), want) {
 			t.Errorf("changelog.d/README.md does not mention %q", want)
@@ -1100,6 +1103,102 @@ func TestRenderRetiresTheVersionFileAndShipsTheFragmentDirectory(t *testing.T) {
 	}
 	if _, ok := rendered["changelog.d/.gitkeep"]; !ok {
 		t.Error("rendered tree has no changelog.d/.gitkeep")
+	}
+}
+
+// TestRenderShipsTheChangelogTheReleaseCheckReads makes the scaffold ship what
+// `tfkit release check` enforces: a CHANGELOG.md exists (with exactly one
+// Unreleased heading) and the assembler the CI message names exists.
+func TestRenderShipsTheChangelogTheReleaseCheckReads(t *testing.T) {
+	rendered, err := scaffold.Render(scaffoldDir, trinoValues())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	changelog, ok := rendered["CHANGELOG.md"]
+	if !ok {
+		t.Fatal("rendered tree has no CHANGELOG.md; release check would fail on every provider")
+	}
+	if got := strings.Count(string(changelog), "\n## Unreleased\n"); got != 1 {
+		t.Errorf("CHANGELOG.md has %d '## Unreleased' headings, want exactly 1", got)
+	}
+	if strings.Contains(string(changelog), "{{") {
+		t.Errorf("CHANGELOG.md carries an unrendered placeholder: %q", changelog)
+	}
+
+	script, ok := rendered["scripts/changelog-release.sh"]
+	if !ok {
+		t.Fatal("rendered tree has no scripts/changelog-release.sh; the CI message names it")
+	}
+	if !strings.HasPrefix(string(script), "#!/usr/bin/env bash") {
+		t.Error("scripts/changelog-release.sh is not a bash script")
+	}
+
+	makefile, ok := rendered["GNUmakefile"]
+	if !ok {
+		t.Fatal("rendered tree has no GNUmakefile")
+	}
+	for _, want := range []string{"changelog-release:", "scripts/changelog-release.sh"} {
+		if !strings.Contains(string(makefile), want) {
+			t.Errorf("GNUmakefile does not mention %q", want)
+		}
+	}
+}
+
+// TestRenderedScaffoldAssemblesAChangelogTheReleaseCheckAccepts runs the
+// shipped assembler on a rendered tree and checks the result with the shipped
+// release check: the scaffold's own CHANGELOG.md and the checker must agree.
+func TestRenderedScaffoldAssemblesAChangelogTheReleaseCheckAccepts(t *testing.T) {
+	rendered, err := scaffold.Render(scaffoldDir, trinoValues())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	dir := t.TempDir()
+	writeTree(t, dir, rendered)
+
+	// The rendered README is prose; the install example that carries the
+	// constraint is what a provider writes. Supply the one that matches the
+	// section the assembler is about to cut.
+	readme := `# Terraform Provider for Trino
+
+` + "```hcl" + `
+terraform {
+  required_providers {
+    trino = {
+      version = "~> 0.1"
+    }
+  }
+}
+` + "```" + `
+`
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte(readme), 0o644); err != nil {
+		t.Fatalf("write README.md: %v", err)
+	}
+	fragment := filepath.Join(dir, "changelog.d", "1-feature-first-release.md")
+	if err := os.WriteFile(fragment, []byte("The first release.\n"), 0o644); err != nil {
+		t.Fatalf("write fragment: %v", err)
+	}
+
+	cmd := exec.CommandContext(t.Context(), "bash", "scripts/changelog-release.sh", "0.1.0")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("assemble changelog: %v (%s)", err, out)
+	}
+
+	report, err := release.Check(release.Options{
+		Changelog: filepath.Join(dir, "CHANGELOG.md"),
+		Readme:    filepath.Join(dir, "README.md"),
+		LastTag:   func() (string, error) { return "", release.ErrNoTag },
+	})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if got, want := report.Version, "0.1.0"; got != want {
+		t.Errorf("version = %q, want %q", got, want)
+	}
+	if len(report.Problems) != 0 {
+		t.Errorf("problems = %q, want the rendered changelog and README to agree", report.Problems)
 	}
 }
 

@@ -50,5 +50,6 @@ jobs:
       dist-prefix: terraform-provider-{{PROVIDER}}
       # No version file: the tag is the version. `changelog-check` lives in the
       # tag job, which a tag-driven repository does not run; the changelog is
-      # checked by `tfkit release check` against the last tag instead.
+      # checked by `tfkit release check`, which compares the newest section with
+      # the README and reports the last tag as pending or released.
       tag: ${{ github.event.inputs.tag }}

@@ -87,12 +87,13 @@ func TestProviderCIScaffoldJobIsSkippedByDefault(t *testing.T) {
 	}
 }
 
-// TestProviderCIPinsATfkitWithTheScaffoldCommand pins the version the job
-// installs. v0.9.0 predates `scaffold`, so the job could not run at all.
-func TestProviderCIPinsATfkitWithTheScaffoldCommand(t *testing.T) {
+// TestProviderCIPinsATfkitWithTheNewReleaseDefault pins the version the job
+// installs. v0.9.0 predates `scaffold`; v0.11.0 predates the changelog-based
+// release check, so a provider on that pin still compares against the last tag.
+func TestProviderCIPinsATfkitWithTheNewReleaseDefault(t *testing.T) {
 	workflow := readProviderCI(t)
-	if got, want := workflow.Env["TFKIT_VERSION"], "v0.11.0"; got != want {
-		t.Errorf("TFKIT_VERSION = %q, want %q (the first release with scaffold check)", got, want)
+	if got, want := workflow.Env["TFKIT_VERSION"], "v0.12.0"; got != want {
+		t.Errorf("TFKIT_VERSION = %q, want %q (the first tag with the new release default)", got, want)
 	}
 }
 
@@ -141,7 +142,7 @@ func runScaffoldJob(t *testing.T, env map[string]string, tfkitExit int) (int, st
 	command.Dir = dir
 	command.Env = append(os.Environ(),
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"TFKIT_VERSION=v0.11.0",
+		"TFKIT_VERSION=v0.12.0",
 		"FAKE_ARGS="+argsFile,
 		"FAKE_EXIT="+strconv.Itoa(tfkitExit),
 		"GITHUB_STEP_SUMMARY="+summary,

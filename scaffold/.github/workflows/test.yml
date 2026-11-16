@@ -49,8 +49,9 @@ jobs:
       versions-file: {{VERSIONS_FILE}}
       packages: {{PACKAGES}}
       # A release pull request is the only change that moves the changelog's
-      # newest section. The released version is the last tag, so the check
-      # compares the changelog and the README against that tag.
+      # newest section. The check compares that section's minor with the README
+      # install constraint; the last tag is reported as pending or released,
+      # never required.
       changelog: true
       # Every pull request that can change what a user sees carries a fragment
       # in changelog.d/ instead of editing CHANGELOG.md.

@@ -48,6 +48,13 @@ const (
 // provider-specific scripts, NOTICE, LICENSE and the workflow callers are
 // deliberately not here; the scaffold ships them, but they carry facts a
 // provider legitimately states differently.
+//
+// CHANGELOG.md, scripts/changelog-release.sh and changelog.d/README.md are
+// shipped but not enforced. Their text is repository content a release or a
+// provider edits (a released changelog gains sections, and rustfs arrived with
+// its own assembler and fragment README), so byte-enforcing them would make
+// `fix` overwrite a release's history. The release check enforces what matters
+// about CHANGELOG.md — a new release cannot skip it — without owning its bytes.
 var enforced = []string{
 	".editorconfig",
 	".gitignore",
@@ -61,7 +68,6 @@ var enforced = []string{
 	".github/CODEOWNERS",
 	".github/dependabot.yml",
 	".github/PULL_REQUEST_TEMPLATE.md",
-	"changelog.d/README.md",
 	"changelog.d/.gitkeep",
 }
 

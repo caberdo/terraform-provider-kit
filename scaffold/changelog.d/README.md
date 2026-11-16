@@ -40,8 +40,11 @@ effect on existing state when behaviour changes.
 
 ## Releasing
 
-The release pull request is the only place that edits `CHANGELOG.md`. Before
-tagging, it groups every fragment by kind, sorts each group by issue number,
-inserts a dated section below the always-empty `## Unreleased` heading and
-deletes the processed fragments. A change that no user can observe needs no
-fragment; label such a pull request `skip-changelog` instead.
+The release pull request is the only place that edits `CHANGELOG.md`. It runs
+`make changelog-release VERSION=x.y.z` (backed by
+`scripts/changelog-release.sh`), which groups every fragment by kind, sorts
+each group by issue number, inserts a dated section below the always-empty
+`## Unreleased` heading and deletes the processed fragments. A change that no
+user can observe needs no fragment; label such a pull request
+`skip-changelog` instead. The same label covers a pull request that touches
+none of Go code, workflows, docs or examples.

@@ -23,6 +23,21 @@ Nothing yet.
 - Fixed a thing.
 `
 
+// releasePending is a release pull request: the newest section is 1.3.0 while
+// the last tag is still 1.2.3.
+const releasePending = `# Changelog
+
+## Unreleased
+
+## [1.3.0] - 2026-11-16
+
+- Added a thing.
+
+## [1.2.3] - 2026-11-14
+
+- Fixed a thing.
+`
+
 // releaseReadme pins the 1.2 minor in its install example.
 const releaseReadme = "# terraform-provider-example\n" +
 	"\n" +
@@ -31,6 +46,19 @@ const releaseReadme = "# terraform-provider-example\n" +
 	"  required_providers {\n" +
 	"    example = {\n" +
 	"      version = \"~> 1.2\"\n" +
+	"    }\n" +
+	"  }\n" +
+	"}\n" +
+	"```\n"
+
+// releaseReadme13 pins the 1.3 minor.
+const releaseReadme13 = "# terraform-provider-example\n" +
+	"\n" +
+	"```hcl\n" +
+	"terraform {\n" +
+	"  required_providers {\n" +
+	"    example = {\n" +
+	"      version = \"~> 1.3\"\n" +
 	"    }\n" +
 	"  }\n" +
 	"}\n" +
@@ -107,6 +135,7 @@ func TestRunReleaseCheckListsEveryProblem(t *testing.T) {
 		}
 	}
 }
+
 func TestRunReleaseCheckMissingFileExitsTwo(t *testing.T) {
 	versionFile, changelog, readme := releaseFiles(t, "1.2.3\n", releaseChangelog, releaseReadme)
 	if err := os.Remove(readme); err != nil {
@@ -169,8 +198,10 @@ func TestRunReleaseCheckHelpExitsZero(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if !strings.Contains(stderr.String(), "--version-file") {
-		t.Errorf("stderr = %q, want the flag documentation", stderr.String())
+	for _, want := range []string{"--version-file", "last git tag", "newest"} {
+		if !strings.Contains(strings.ToLower(stderr.String()), strings.ToLower(want)) {
+			t.Errorf("stderr = %q, want it to mention %q", stderr.String(), want)
+		}
 	}
 }
 
@@ -220,8 +251,11 @@ func releaseRepo(t *testing.T, tag, changelog, readme string) string {
 	return dir
 }
 
-func TestRunReleaseCheckDerivesVersionFromTheLastTag(t *testing.T) {
-	dir := releaseRepo(t, "v1.2.3", releaseChangelog, releaseReadme)
+// TestRunReleaseCheckReleasePullRequestExitsZero is the regression that made
+// the check useless as a gate: a release pull request is exactly the commit
+// that moves the changelog ahead of the last tag.
+func TestRunReleaseCheckReleasePullRequestExitsZero(t *testing.T) {
+	dir := releaseRepo(t, "v1.2.3", releasePending, releaseReadme13)
 	t.Chdir(dir)
 
 	var stdout, stderr bytes.Buffer
@@ -233,15 +267,30 @@ func TestRunReleaseCheckDerivesVersionFromTheLastTag(t *testing.T) {
 	if got := stderr.String(); got != "" {
 		t.Errorf("stderr = %q, want empty", got)
 	}
-	want := "release-check: 1.2.3 from the last git tag (v1.2.3), CHANGELOG.md and README.md agree\n"
+	want := "release-check: 1.3.0, CHANGELOG.md and README.md agree (pending release; last tag v1.2.3)\n"
 	if got := stdout.String(); got != want {
 		t.Errorf("stdout = %q, want %q", got, want)
 	}
 }
 
-func TestRunReleaseCheckTagWithoutAChangelogSectionExitsOne(t *testing.T) {
-	// The last tag is 1.2.2, but the changelog was cut for 1.2.3.
-	dir := releaseRepo(t, "v1.2.2", releaseChangelog, releaseReadme)
+func TestRunReleaseCheckReleasedStateExitsZero(t *testing.T) {
+	dir := releaseRepo(t, "v1.2.3", releaseChangelog, releaseReadme)
+	t.Chdir(dir)
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{"release", "check"}, testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr.String())
+	}
+	want := "release-check: 1.2.3, CHANGELOG.md and README.md agree (released; last tag v1.2.3)\n"
+	if got := stdout.String(); got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestRunReleaseCheckChangelogReadmeDisagreementExitsOne(t *testing.T) {
+	dir := releaseRepo(t, "v1.2.3", releasePending, releaseReadme)
 	t.Chdir(dir)
 
 	var stdout, stderr bytes.Buffer
@@ -253,13 +302,37 @@ func TestRunReleaseCheckTagWithoutAChangelogSectionExitsOne(t *testing.T) {
 	if got := stdout.String(); got != "" {
 		t.Errorf("stdout = %q, want empty", got)
 	}
-	if want := "but the last git tag is 'v1.2.2', which names '1.2.2'"; !strings.Contains(stderr.String(), want) {
+	if want := `must install with version = "~> 1.3"`; !strings.Contains(stderr.String(), want) {
 		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
 	}
 }
 
-func TestRunReleaseCheckWithoutATagExitsTwo(t *testing.T) {
-	dir := releaseRepo(t, "", releaseChangelog, releaseReadme)
+func TestRunReleaseCheckWithoutATagExitsZero(t *testing.T) {
+	dir := releaseRepo(t, "", releasePending, releaseReadme13)
+	t.Chdir(dir)
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{"release", "check"}, testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr.String())
+	}
+	want := "release-check: 1.3.0, CHANGELOG.md and README.md agree (no tag yet)\n"
+	if got := stdout.String(); got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestRunReleaseCheckNotARepositoryExitsTwo(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"CHANGELOG.md": releasePending,
+		"README.md":    releaseReadme13,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
 	t.Chdir(dir)
 
 	var stdout, stderr bytes.Buffer
@@ -268,11 +341,33 @@ func TestRunReleaseCheckWithoutATagExitsTwo(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
 	}
+	if want := "not a git repository"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want it to say %q", stderr.String(), want)
+	}
+}
+
+func TestRunReleaseCheckLegacyVersionFileExitsTwo(t *testing.T) {
+	dir := releaseRepo(t, "v1.2.3", releaseChangelog, releaseReadme)
+	if err := os.WriteFile(filepath.Join(dir, "VERSION"), []byte("1.2.3\n"), 0o600); err != nil {
+		t.Fatalf("write VERSION: %v", err)
+	}
+	t.Chdir(dir)
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{"release", "check"}, testVersion, &stdout, &stderr)
+
+	// A botched migration must fail loudly instead of restoring the old
+	// contract: the flag is the only way to say "read a version file".
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
 	if got := stdout.String(); got != "" {
 		t.Errorf("stdout = %q, want empty", got)
 	}
-	if want := "no git tag found"; !strings.Contains(stderr.String(), want) {
-		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+	for _, want := range []string{"legacy", "VERSION", "--version-file"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want it to mention %q", stderr.String(), want)
+		}
 	}
 }
 
@@ -293,9 +388,9 @@ func TestRunReleaseCheckExplicitMissingVersionFileExitsTwo(t *testing.T) {
 	}
 }
 
-func TestRunReleaseCheckPrefersTheVersionFileWhenPresent(t *testing.T) {
-	// A repository mid-migration still carrying VERSION keeps the old
-	// behaviour: the file wins over the tag, even when they disagree.
+func TestRunReleaseCheckExplicitVersionFileKeepsTheOldContract(t *testing.T) {
+	// An explicitly passed version file still supplies the version, even when
+	// it disagrees with the tag: that behaviour is unchanged.
 	dir := releaseRepo(t, "v1.2.4", releaseChangelog, releaseReadme)
 	if err := os.WriteFile(filepath.Join(dir, "VERSION"), []byte("1.2.3\n"), 0o600); err != nil {
 		t.Fatalf("write VERSION: %v", err)
@@ -303,7 +398,7 @@ func TestRunReleaseCheckPrefersTheVersionFileWhenPresent(t *testing.T) {
 	t.Chdir(dir)
 
 	var stdout, stderr bytes.Buffer
-	code := cli.Run([]string{"release", "check"}, testVersion, &stdout, &stderr)
+	code := cli.Run([]string{"release", "check", "--version-file", "VERSION"}, testVersion, &stdout, &stderr)
 
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr.String())
@@ -314,8 +409,8 @@ func TestRunReleaseCheckPrefersTheVersionFileWhenPresent(t *testing.T) {
 	}
 }
 
-func TestRunReleaseCheckEmptyVersionFileFlagDerivesFromTheTag(t *testing.T) {
-	dir := releaseRepo(t, "v1.2.3", releaseChangelog, releaseReadme)
+func TestRunReleaseCheckEmptyVersionFileFlagDerivesFromTheChangelog(t *testing.T) {
+	dir := releaseRepo(t, "v1.2.3", releasePending, releaseReadme13)
 	if err := os.WriteFile(filepath.Join(dir, "VERSION"), []byte("1.2.2\n"), 0o600); err != nil {
 		t.Fatalf("write VERSION: %v", err)
 	}
@@ -324,10 +419,12 @@ func TestRunReleaseCheckEmptyVersionFileFlagDerivesFromTheTag(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := cli.Run([]string{"release", "check", "--version-file", ""}, testVersion, &stdout, &stderr)
 
+	// An explicit empty value opts out of the legacy file without tripping the
+	// migration error.
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr.String())
 	}
-	if want := "from the last git tag (v1.2.3)"; !strings.Contains(stdout.String(), want) {
+	if want := "(pending release; last tag v1.2.3)"; !strings.Contains(stdout.String(), want) {
 		t.Errorf("stdout = %q, want it to contain %q", stdout.String(), want)
 	}
 }

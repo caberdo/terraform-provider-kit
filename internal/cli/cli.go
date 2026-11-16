@@ -468,36 +468,46 @@ func runRelease(args []string, stdout, stderr io.Writer) int {
 }
 
 // runReleaseCheck implements `tfkit release check`. It only parses arguments;
-// reading the three files and deciding whether they agree belongs to the
-// release package. Exit codes are the script's: 0 when the metadata is
-// consistent, 1 when it is not (with every problem listed) and 2 for a usage
-// problem or a required file that is missing or unreadable.
+// reading the changelog and README, and deciding whether they agree, belongs to
+// the release package. Exit codes: 0 when the metadata is consistent, 1 when it
+// is not (with every problem listed) and 2 for a usage problem, a required file
+// that is missing or unreadable, a legacy version file the flag did not name,
+// or a git state that cannot be inspected.
 func runReleaseCheck(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("tfkit release check", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	versionFile := flags.String("version-file", "",
-		"path of the file holding the version; empty derives it from the last git tag")
+		"path of the file holding the version; empty derives it from the newest changelog release section")
 	changelog := flags.String("changelog", release.DefaultChangelog, "path of the changelog")
 	readme := flags.String("readme", release.DefaultReadme,
 		"path of the README carrying the install constraint")
 	flags.Usage = func() {
 		_, _ = io.WriteString(stderr, `usage: tfkit release check [flags]
 
-Verifies that the version being shipped has a dated changelog section and that
-the README installs that minor. Every inconsistency is reported in one run, so a
-release pull request is fixed in one pass.
+Verifies that the changelog's newest release section and the README install
+constraint agree. Every inconsistency is reported in one run, so a release pull
+request is fixed in one pass.
 
-The version comes from --version-file when that names a file. Without the flag,
-a VERSION file beside the working directory is still read; when there is none,
-the version is the last git tag (git describe --tags --abbrev=0) with any
-leading 'v' removed. The repository does not carry the version as a file.
+The version is the tag, so the tag is not an input to the verdict. Without a
+version file the version is the newest release section in the changelog; the
+last git tag (git describe --tags --abbrev=0 --match 'v*') is reported beside
+it as "pending release" when the changelog is ahead and "released" when they
+match. A mismatch is not an error: it is the normal state of a release pull
+request and of main between the merge and the tag push. With no tag at all the
+check still runs.
 
-Exits 0 when the metadata is consistent, 1 when it is not, and 2 when a required
-file is missing or unreadable or the repository has no tag.
+--version-file keeps the older contract: that file supplies the version and
+must agree with the changelog and the README. A VERSION file the flag did not
+name is refused, so a botched migration fails instead of silently restoring the
+old contract.
+
+Exits 0 when the metadata is consistent, 1 when it is not, and 2 for a usage
+problem, a required file that is missing or unreadable, or a git state that
+cannot be inspected (not a repository, a shallow clone without tags, no git).
 
 Flags:
   --version-file  path of the file holding the version; empty derives it from
-                  the last git tag (default: read VERSION when it exists)
+                  the newest changelog release section
   --changelog     path of the changelog (default "CHANGELOG.md")
   --readme        path of the README carrying the install constraint
                   (default "README.md")
@@ -515,8 +525,9 @@ Flags:
 	}
 
 	// An explicit path is an instruction: a missing file is an error rather
-	// than a silent fallback to the tag. Only the unflagged case probes the
-	// legacy file and then derives the version.
+	// than a silent fallback. Only the unflagged case probes for the legacy
+	// file, and finding one is a configuration error: a repository that was
+	// migrated to the tag must not silently get the old contract back.
 	explicitVersionFile := false
 	flags.Visit(func(f *flag.Flag) {
 		if f.Name == "version-file" {
@@ -526,7 +537,10 @@ Flags:
 	versionPath := *versionFile
 	if versionPath == "" && !explicitVersionFile {
 		if _, err := os.Stat(release.DefaultVersionFile); err == nil {
-			versionPath = release.DefaultVersionFile
+			_, _ = fmt.Fprintf(stderr,
+				"release-check: refusing the legacy '%s' file: the version is the last git tag; delete it, or pass --version-file %s to keep the old contract\n",
+				release.DefaultVersionFile, release.DefaultVersionFile)
+			return exitUsage
 		}
 	}
 
@@ -546,13 +560,27 @@ Flags:
 		return exitFailure
 	}
 
+	detail := "no tag yet"
 	if report.Tag != "" {
-		_, _ = fmt.Fprintf(stdout, "release-check: %s from the last git tag (%s), %s and %s agree\n",
-			report.Version, report.Tag, *changelog, *readme)
-		return exitOK
+		detail = "last tag " + report.Tag
+		if report.State != "" {
+			detail = report.State + "; " + detail
+		}
 	}
-	_, _ = fmt.Fprintf(stdout, "release-check: %s=%s, %s and %s agree\n",
-		versionPath, report.Version, *changelog, *readme)
+
+	switch {
+	case versionPath != "":
+		_, _ = fmt.Fprintf(stdout, "release-check: %s=%s, %s and %s agree\n",
+			versionPath, report.Version, *changelog, *readme)
+	case report.Version == "":
+		// A changelog with only `## Unreleased` is a repository before its
+		// first release: there is no version to compare.
+		_, _ = fmt.Fprintf(stdout, "release-check: no release section yet, %s and %s agree (%s)\n",
+			*changelog, *readme, detail)
+	default:
+		_, _ = fmt.Fprintf(stdout, "release-check: %s, %s and %s agree (%s)\n",
+			report.Version, *changelog, *readme, detail)
+	}
 	return exitOK
 }
 

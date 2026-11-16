@@ -91,10 +91,19 @@ validate-examples: $(TFKIT_DEP)
 generate:
 	go generate ./...
 
-# Fail when the changelog and the README disagree with the released version.
-# The released version is the last git tag, so there is no file to keep in sync.
-# The tag workflow enforces the same agreement on main; this keeps the failure
-# visible before the next release instead of after it.
+# Assemble the changelog.d/ fragments into a dated CHANGELOG.md section and
+# delete the processed fragments. The release pull request runs this once; a
+# feature pull request only adds a fragment. Call it through bash so the target
+# works even when the scaffold was written without the executable bit.
+changelog-release:
+	@case "$(VERSION)" in [0-9]*.[0-9]*.[0-9]*) ;; *) echo "usage: make changelog-release VERSION=x.y.z" >&2; exit 2 ;; esac
+	bash scripts/changelog-release.sh "$(VERSION)"
+
+# Fail when the changelog's newest release section and the README install
+# constraint disagree. The version is the tag, so the tag is not an input to the
+# verdict: a release pull request moves the changelog ahead of the tag and must
+# pass. The success line reports whether that release is pending or already
+# tagged.
 release-check: $(TFKIT_DEP)
 	$(TFKIT) release check
 
@@ -113,4 +122,4 @@ scaffold-check: $(TFKIT_DEP)
 		--repo {{REPO}} \
 		--license {{LICENSE}}
 
-.PHONY: default build test coverage coverage-html coverage-merge coverage-readme coverage-readme-check coverage-gate testacc testacc-docker lint lint-fix fmt vet install validate-examples generate release-check scaffold-check
+.PHONY: default build test coverage coverage-html coverage-merge coverage-readme coverage-readme-check coverage-gate testacc testacc-docker lint lint-fix fmt vet install validate-examples generate changelog-release release-check scaffold-check
