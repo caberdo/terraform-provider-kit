@@ -7,8 +7,8 @@
 #
 # The caller must grant `contents: read`, `security-events: write` and
 # `id-token: write`. The workflow-level `permissions: contents: read` is part of
-# the contract: a caller job that omits `contents` is rejected at startup, the
-# same way a window-level `read-all` would be.
+# the contract: the caller's grant is a ceiling, so a caller job that narrows
+# `contents` away rejects the call at startup.
 name: Provider Scorecard
 
 on:

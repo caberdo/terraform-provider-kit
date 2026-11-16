@@ -18,17 +18,20 @@
 # contexts. Additive jobs (vuln, coverage, mdvalidate, versions) report as
 # *skipped* for a provider that does not opt in, and a skipped context satisfies
 # a required check, so they can be added to a ruleset before they do any work.
-# `docs` is additive too, but it is deliberately unconditional: it always runs,
-# reports success and writes a "disabled" line to the step summary, because
-# openmetadata's ruleset requires a context literally named `Docs`.
+# `docs` is additive too, but its work is gated at step level by
+# `env.DOCS_ENABLED` instead of a job-level `if:`, so the job itself has no
+# `if:` and its name is always evaluated.
 #
 # A display name must be static whenever the job can be skipped: GitHub does not
 # evaluate `name:` for a job that does not run, so an input-driven name would
 # surface as the literal expression in the status-check context. `versions` is
 # skipped on pull requests by design, hence the literal `Supported Versions`.
-# `docs` is the only input-driven name left, and it is safe only because that
-# job has no `if:` and therefore always evaluates its name; do not make it
-# conditional without first giving it a static name.
+# `docs` is the only input-driven name left: `docs-job-name` defaults to
+# "Generate Docs", and a caller that needs another literal passes it (openmetadata
+# passes `Docs` because its ruleset requires that string). That is safe only
+# because a running job reports its evaluated name and this job has no `if:`;
+# only a skipped job reports the raw expression. Do not give it an `if:` without
+# first making the name static.
 #
 # The caller must grant `security-events: write` for `lint` and, for
 # `docs-mode: autopr`, `contents: write` + `pull-requests: write` for `docs`.
