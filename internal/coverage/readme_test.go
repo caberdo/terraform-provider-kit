@@ -498,6 +498,29 @@ func TestRenderReadmeRejectsOverlappingBlocks(t *testing.T) {
 	}
 }
 
+func TestRenderReadmeRejectsAScopeReadme(t *testing.T) {
+	// Both dialects now share the marker pairs, so the baseline is the only
+	// dialect signal. A bare baseline applied to a scope README must be refused:
+	// rewriting the table pair would replace the per-scope rows and the
+	// repository-owned prose inside them with one sentence.
+	badge, block := committedBlocks(t, "gravitino")
+	doc := "# Title\n\n" + badge + "\n\nProse.\n\n" + block + "\n"
+
+	rendered, err := coverage.RenderReadme([]byte(doc), 80, currentGateCommand)
+
+	if !errors.Is(err, coverage.ErrReadmeMarkers) {
+		t.Fatalf("RenderReadme() error = %v, want ErrReadmeMarkers", err)
+	}
+	if rendered != nil {
+		t.Errorf("RenderReadme() = %q, want nil on error", rendered)
+	}
+	for _, want := range []string{"key=value coverage table", "single percentage"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
 func TestCheckReadmeReportsStale(t *testing.T) {
 	doc := []byte(trinoReadmeStale)
 	before := bytes.Clone(doc)

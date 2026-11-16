@@ -22,9 +22,10 @@ const (
 	readmeFloorBadgeAnchor = "(#testing-and-coverage)"
 )
 
-// ErrReadmeMarkers reports that doc does not carry exactly one coverage marker
-// pair, in order. The caller adds the README path, which a byte slice cannot
-// carry. RenderReadme and CheckReadme both wrap it, so a caller can map it to a
+// ErrReadmeMarkers reports that doc does not carry the two marker pairs its
+// dialect requires, in order, or that a marker region holds the other dialect's
+// content. The caller adds the README path, which a byte slice cannot carry.
+// RenderReadme and CheckReadme both wrap it, so a caller can map it to a
 // configuration exit code.
 var ErrReadmeMarkers = errors.New("coverage markers are missing or malformed")
 
@@ -65,6 +66,9 @@ func RenderReadme(doc []byte, baseline float64, gateCommand string) ([]byte, err
 	if badgeStart <= end && start <= badgeEnd {
 		return nil, fmt.Errorf("%w: the %q and %q blocks overlap",
 			ErrReadmeMarkers, readmeBadgeStartMarker, readmeStartMarker)
+	}
+	if err := rejectScopeCoverageTable(lines[start+1 : end]); err != nil {
+		return nil, err
 	}
 
 	badge := []string{
@@ -124,6 +128,34 @@ func splitReadmeLines(doc []byte) []string {
 // findReadmeMarkers returns the indexes of the single start and end marker.
 func findReadmeMarkers(lines []string) (int, int, error) {
 	return findMarkerPair(lines, readmeStartMarker, readmeEndMarker)
+}
+
+// rejectScopeCoverageTable refuses a bare-percentage README whose coverage region
+// is the key=value scope table. Both dialects share the marker pairs, so the
+// baseline is the only dialect signal; without this guard a bare baseline would
+// replace the per-scope rows and the repository-owned prose inside the table
+// region with one sentence.
+//
+// The region is classified by [parseScopeRegion], the same parser the scope
+// renderer uses: a fence, a bar glyph or a table row makes it a scope block, and
+// a sentence-only region is the bare shape.
+func rejectScopeCoverageTable(old []string) error {
+	region, err := parseScopeRegion(old)
+	if err == nil && len(region.rows) == 0 {
+		return nil
+	}
+	return regionError("this README carries the key=value coverage table but the baseline is a single percentage")
+}
+
+// readmeFloorBadge reports whether the badge region holds the bare dialect's
+// floor badge rather than a measured one.
+func readmeFloorBadge(old []string) bool {
+	for _, line := range old {
+		if strings.Contains(line, "badge/coverage%20floor-") {
+			return true
+		}
+	}
+	return false
 }
 
 // findMarkerPair returns the indexes of the single start and end marker of one

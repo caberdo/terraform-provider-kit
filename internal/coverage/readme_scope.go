@@ -104,6 +104,10 @@ func CheckScopeReadme(doc []byte, baseline ScopeBaseline) error {
 // scopeBadgeBlock renders the badge pair. old is the region's current body, read
 // only for its link target.
 func scopeBadgeBlock(old []string, baseline ScopeBaseline) ([]string, error) {
+	if readmeFloorBadge(old) {
+		return nil, regionError("the coverage badge is the bare-percentage floor badge, but the baseline is key=value")
+	}
+
 	total, ok := baseline.Measured[TotalPackage]
 	if !ok {
 		return nil, fmt.Errorf("baseline needs a measured_%s scope for the coverage badge", TotalPackage)
@@ -127,6 +131,9 @@ func scopeCoverageBlock(old []string, baseline ScopeBaseline) ([]string, error) 
 	region, err := parseScopeRegion(old)
 	if err != nil {
 		return nil, err
+	}
+	if len(region.rows) == 0 {
+		return nil, regionError("the coverage block is the bare-percentage sentence, but the baseline is key=value")
 	}
 
 	order := readmeScopeOrder(baseline, region.rows)

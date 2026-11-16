@@ -214,6 +214,67 @@ func TestRunCoverageReadmeBareHalfRenderedExitsTwo(t *testing.T) {
 	}
 }
 
+func TestRunCoverageReadmeBareBaselineRejectsAScopeReadme(t *testing.T) {
+	// The baseline selects the dialect. A bare baseline applied to a scope
+	// README must fail closed rather than replace the table and the prose inside
+	// it with one sentence.
+	doc := "# Terraform Provider for x\n" +
+		"\n" +
+		scopeFixtureRead(t, "gravitino-coverage-badge-block.txt") + "\n" +
+		"\n" +
+		"The gate is enforced on every pull request.\n" +
+		"\n" +
+		scopeFixtureRead(t, "gravitino-coverage-block.txt") + "\n"
+	readme := readmeFile(t, "README.md", doc)
+	baseline := readmeFile(t, "coverage-baseline.txt", "80\n")
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{
+		"coverage", "readme",
+		"--readme", readme,
+		"--baseline", baseline,
+	}, testVersion, &stdout, &stderr)
+
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (stderr = %q)", code, stderr.String())
+	}
+	for _, want := range []string{readme, "key=value coverage table", "single percentage"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
+	}
+	if got := readFile(t, readme); got != doc {
+		t.Errorf("README =\n%s\nwant it unchanged after a marker error", got)
+	}
+}
+
+func TestRunCoverageReadmeScopeBaselineRejectsABareReadme(t *testing.T) {
+	// The reverse direction must also fail closed: the sentence would otherwise
+	// be rewritten into a per-scope table.
+	readme := readmeFile(t, "README.md", readmeDoc)
+	baseline := readmeFile(t, "coverage-baseline.txt",
+		scopeFixtureRead(t, "gravitino-coverage-baseline.txt"))
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{
+		"coverage", "readme",
+		"--readme", readme,
+		"--baseline", baseline,
+	}, testVersion, &stdout, &stderr)
+
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (stderr = %q)", code, stderr.String())
+	}
+	for _, want := range []string{readme, "floor badge", "key=value"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
+	}
+	if got := readFile(t, readme); got != readmeDoc {
+		t.Errorf("README =\n%s\nwant it unchanged after a marker error", got)
+	}
+}
+
 func TestRunCoverageReadmeScopeMalformedRegionExitsTwo(t *testing.T) {
 	// Finding A: a corrupt table region must exit 2 without writing, rather than
 	// republishing the old rows beside a fresh table.

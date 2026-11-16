@@ -543,6 +543,57 @@ func TestRenderScopeReadmeEchoesTheBadgeToken(t *testing.T) {
 	}
 }
 
+func TestRenderScopeReadmeRejectsABareReadme(t *testing.T) {
+	// The reverse direction: a scope baseline applied to a bare README would
+	// rewrite the sentence into a table. The floor badge is the first give-away.
+	doc := "# Title\n\n" +
+		scopeBadgeStart + "\n" +
+		"[![Coverage floor](https://img.shields.io/badge/coverage%20floor-80%25-green)](#testing-and-coverage)\n" +
+		scopeBadgeEnd + "\n" +
+		"\n" +
+		scopeBlockStart + "\n" +
+		"The coverage gate fails below **80%** (`make coverage-gate`).\n" +
+		scopeBlockEnd + "\n"
+
+	rendered, err := coverage.RenderScopeReadme([]byte(doc), parseScopeFixture(t, "gravitino"))
+
+	if !errors.Is(err, coverage.ErrReadmeMarkers) {
+		t.Fatalf("RenderScopeReadme() error = %v, want ErrReadmeMarkers", err)
+	}
+	if rendered != nil {
+		t.Errorf("RenderScopeReadme() = %q, want nil on error", rendered)
+	}
+	for _, want := range []string{"floor badge", "key=value"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
+func TestRenderScopeReadmeRejectsABareCoverageBlock(t *testing.T) {
+	// A measured scope badge with a sentence-only region is still the bare
+	// shape, so the coverage region itself must be diagnosed.
+	badge, _ := committedBlocks(t, "gravitino")
+	doc := "# Title\n\n" + badge + "\n\n" +
+		scopeBlockStart + "\n" +
+		"The coverage gate fails below **80%** (`make coverage-gate`).\n" +
+		scopeBlockEnd + "\n"
+
+	rendered, err := coverage.RenderScopeReadme([]byte(doc), parseScopeFixture(t, "gravitino"))
+
+	if !errors.Is(err, coverage.ErrReadmeMarkers) {
+		t.Fatalf("RenderScopeReadme() error = %v, want ErrReadmeMarkers", err)
+	}
+	if rendered != nil {
+		t.Errorf("RenderScopeReadme() = %q, want nil on error", rendered)
+	}
+	for _, want := range []string{"bare-percentage sentence", "key=value"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
 func TestCheckScopeReadmeFailsOnAMarkerProblem(t *testing.T) {
 	err := coverage.CheckScopeReadme([]byte("# Title\n\nNo blocks here.\n"), parseScopeFixture(t, "rustfs"))
 
