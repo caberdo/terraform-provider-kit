@@ -555,7 +555,8 @@ Flags:
   --profile   path of the cover profile to check (default "coverage.out")
   --baseline  path of the statement-coverage baseline (default ".github/coverage-baseline.txt")
   --floors    path of the per-package floors; when absent only the total is gated
-              (default ".github/coverage-floors.txt")
+              (default ".github/coverage-floors.txt"); not used when the baseline
+              is the key=value dialect, whose floors live in that file
   --packages  go list pattern for the packages to check (default "./internal/...")
 `)
 	}
@@ -575,9 +576,23 @@ Flags:
 		_, _ = fmt.Fprintf(stderr, "coverage-gate: %v\n", err)
 		return exitUsage
 	}
-	baseline, err := readBaselineFile(*baselinePath)
+	baselineData, err := readBaselineData(*baselinePath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "coverage-gate: %v\n", err)
+		return exitUsage
+	}
+
+	// The file is the interface: a baseline that carries `floor_` keys is the
+	// key=value scope dialect and is gated by GateScopes, everything else by
+	// the bare-percentage Gate. A flag would let a provider gate with the
+	// wrong parser by forgetting it, so there is none.
+	if coverage.ScopeDialect(baselineData) {
+		return runCoverageGateScopes(profile, baselineData, *profilePath, *baselinePath, *patterns, stdout, stderr)
+	}
+
+	baseline, err := coverage.ReadBaseline(bytes.NewReader(baselineData))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: %s: %v\n", *baselinePath, err)
 		return exitUsage
 	}
 
@@ -634,6 +649,50 @@ Flags:
 	}
 
 	_, _ = io.WriteString(stdout, "coverage-gate: PASS\n")
+	return exitOK
+}
+
+// runCoverageGateScopes implements `tfkit coverage gate` for the key=value
+// baseline dialect: the floors live in the baseline file, so no floors file is
+// read. It prints the dialect it chose on stderr, keeping stdout byte-identical
+// to the shell script whose CI output it replaces.
+func runCoverageGateScopes(
+	profile coverage.Profile,
+	baselineData []byte,
+	profilePath, baselinePath, patterns string,
+	stdout, stderr io.Writer,
+) int {
+	_, _ = fmt.Fprintf(stderr, "coverage-gate: baseline dialect: key=value (%s carries floor_ keys)\n", baselinePath)
+
+	baseline, err := coverage.ParseScopeBaseline(bytes.NewReader(baselineData))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: %s: %v\n", baselinePath, err)
+		return exitUsage
+	}
+
+	packages, err := listGoPackages(patterns)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: go list %q: %v\n", patterns, err)
+		return exitUsage
+	}
+	if len(packages) == 0 {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: go list %q returned no packages\n", patterns)
+		return exitUsage
+	}
+
+	report, err := coverage.GateScopes(profile, baseline, packages)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: %v\n", err)
+		return exitUsage
+	}
+
+	if err := coverage.WriteScopeReport(stdout, baseline, report, profilePath, baselinePath); err != nil {
+		_, _ = fmt.Fprintf(stderr, "coverage-gate: %v\n", err)
+		return exitFailure
+	}
+	if len(report.Failures) > 0 {
+		return exitFailure
+	}
 	return exitOK
 }
 
@@ -779,18 +838,27 @@ func readProfileFile(path string) (coverage.Profile, error) {
 	return profile, nil
 }
 
-// readBaselineFile reads the bare-percentage baseline at path.
-func readBaselineFile(path string) (float64, error) {
-	file, err := os.Open(path)
+// readBaselineData reads the raw baseline bytes. The dialect is detected from
+// the file's keys, so the gate needs the content before it can choose a parser.
+func readBaselineData(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return 0, fmt.Errorf("baseline %q not found", path)
+			return nil, fmt.Errorf("baseline %q not found", path)
 		}
+		return nil, err
+	}
+	return data, nil
+}
+
+// readBaselineFile reads the bare-percentage baseline at path.
+func readBaselineFile(path string) (float64, error) {
+	data, err := readBaselineData(path)
+	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = file.Close() }()
 
-	baseline, err := coverage.ReadBaseline(file)
+	baseline, err := coverage.ReadBaseline(bytes.NewReader(data))
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", path, err)
 	}
