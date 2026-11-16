@@ -164,10 +164,18 @@ func jobFromNode(keyNode, valueNode *yaml.Node) (Job, error) {
 }
 
 // calledJobs expands the "uses:" reference of a caller job. A local reference
-// is read from disk relative to the calling workflow; a remote one is fetched
-// through gh. It returns errUnresolved when a remote call cannot be fetched.
+// is read from disk; a remote one is fetched through gh. It returns
+// errUnresolved when a remote call cannot be fetched.
+//
+// GitHub writes local reusable workflows relative to the repository root
+// ("./.github/workflows/release.yml"). A caller that lives in
+// .github/workflows therefore resolves such a reference from the root, while a
+// bare "./called.yml" stays relative to the calling workflow's directory.
 func calledJobs(callerPath, uses string, gh workflowFetcher, stack map[string]bool) ([]Job, error) {
 	if strings.HasPrefix(uses, "./") || strings.HasPrefix(uses, "../") {
+		if root, ok := repositoryRoot(callerPath); ok && strings.HasPrefix(uses, "./.github/workflows/") {
+			return jobsInFile(filepath.Join(root, uses), gh, stack)
+		}
 		return jobsInFile(filepath.Join(filepath.Dir(callerPath), uses), gh, stack)
 	}
 
@@ -197,6 +205,16 @@ func calledJobs(callerPath, uses string, gh workflowFetcher, stack map[string]bo
 		jobs = append(jobs, job)
 	}
 	return jobs, nil
+}
+
+// repositoryRoot derives the repository root from a workflow that lives in
+// .github/workflows. It reports false for any other location.
+func repositoryRoot(callerPath string) (string, bool) {
+	workflows := filepath.Dir(callerPath)
+	if filepath.Base(workflows) != "workflows" || filepath.Base(filepath.Dir(workflows)) != ".github" {
+		return "", false
+	}
+	return filepath.Dir(filepath.Dir(workflows)), true
 }
 
 // splitRemoteCall splits "owner/repo/path/to/workflow.yml@ref".
