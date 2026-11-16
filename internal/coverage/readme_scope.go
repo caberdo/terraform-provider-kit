@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 )
 
@@ -112,7 +113,7 @@ func scopeBadgeBlock(old []string, baseline ScopeBaseline) ([]string, error) {
 	}
 
 	badge := fmt.Sprintf("[![Coverage](https://img.shields.io/badge/coverage-%s%%25-%s)]%s",
-		formatPercent(total), readmeBadgeColor(total), readmeBadgeLink(old))
+		readmeMeasuredText(baseline, TotalPackage), readmeBadgeColor(total), readmeBadgeLink(old))
 	return []string{readmeBadgeStartMarker, badge, readmeBadgeEndMarker}, nil
 }
 
@@ -120,7 +121,15 @@ func scopeBadgeBlock(old []string, baseline ScopeBaseline) ([]string, error) {
 // order with the module total last, then the prose the repository owns, then the
 // provenance line.
 func scopeCoverageBlock(old []string, baseline ScopeBaseline) ([]string, error) {
-	order := readmeScopeOrder(baseline, old)
+	// The region is parsed structurally first: every old row must be recognised
+	// as a row, or it would be copied into the new block as prose and published
+	// beside the generated table.
+	region, err := parseScopeRegion(old)
+	if err != nil {
+		return nil, err
+	}
+
+	order := readmeScopeOrder(baseline, region.rows)
 	labels := make([]string, len(order))
 	width := 0
 	for i, scope := range order {
@@ -128,7 +137,7 @@ func scopeCoverageBlock(old []string, baseline ScopeBaseline) ([]string, error) 
 		width = max(width, len(labels[i]))
 	}
 
-	style := readmeMilestoneStyleOf(old)
+	style := readmeMilestoneStyleOf(region.rows)
 	target, targetText, gold, goldText := readmeMilestones(baseline)
 
 	block := []string{readmeStartMarker, "```"}
@@ -146,8 +155,8 @@ func scopeCoverageBlock(old []string, baseline ScopeBaseline) ([]string, error) 
 	}
 	block = append(block, "```", "")
 
-	if prose := readmeScopeProse(old); len(prose) > 0 {
-		block = append(block, prose...)
+	if len(region.prose) > 0 {
+		block = append(block, region.prose...)
 		block = append(block, "")
 	}
 
@@ -195,10 +204,11 @@ func readmeMeasuredText(baseline ScopeBaseline, scope string) string {
 // The row order is presentation, not data — rustfs lists `pkg/rustfs` before
 // `provider` while its baseline lists `provider` first — so a rewrite keeps the
 // chart a repository already publishes.
-func readmeScopeOrder(baseline ScopeBaseline, old []string) []string {
+func readmeScopeOrder(baseline ScopeBaseline, rows []string) []string {
 	order := make([]string, 0, len(baseline.Measured))
 	seen := map[string]bool{TotalPackage: true}
-	for _, scope := range readmeTableOrder(old) {
+	for _, row := range rows {
+		scope := strings.ReplaceAll(scopeRowLabel(row), "/", "_")
 		if _, ok := baseline.Measured[scope]; !ok || seen[scope] {
 			continue
 		}
@@ -215,25 +225,115 @@ func readmeScopeOrder(baseline ScopeBaseline, old []string) []string {
 	return append(order, TotalPackage)
 }
 
-// readmeTableOrder reads the scope keys of the fenced table in old, in order.
-func readmeTableOrder(old []string) []string {
-	var order []string
-	inFence := false
+// scopeRegion is the validated body of the coverage pair: the table's rows and
+// the prose the repository owns. The renderer regenerates the table, so it must
+// know which lines are rows and which are the repository's words. Any other line
+// would be copied into the new block and published beside the generated table,
+// which is why an unrecognised region is an error rather than prose.
+type scopeRegion struct {
+	rows  []string
+	prose []string
+}
+
+// scopeRowPattern is the shape of one table row:
+//
+//	<label>  <bar>  <measured>%   floor <floor>%[   <total sentence>]
+//
+// The label is padded, so it may contain spaces; the bar is bar characters only;
+// the two percentages are decimal tokens; only the module total carries a
+// sentence after three spaces.
+var scopeRowPattern = regexp.MustCompile(
+	`^(.+?) {2}([` + readmeBarFull + readmeBarEmpty + `]+) {2}` +
+		`[0-9]+(?:\.[0-9]+)?% {3}floor [0-9]+(?:\.[0-9]+)?%` +
+		`( {3}\S.*)?$`)
+
+// parseScopeRegion reads the body between the coverage markers. The accepted
+// shape is: flat prose, one fenced table (opened by ` ``` ` or ` ```text ` and
+// closed by ` ``` `), more flat prose, and at most one provenance line — all
+// outside the fence. Rows outside a fence, a second fenced block, an unclosed
+// fence, a blank line or a non-row inside the fence are errors: a region the
+// renderer cannot classify must be repaired by hand, never appended to.
+func parseScopeRegion(old []string) (scopeRegion, error) {
+	var region scopeRegion
+	fenced, closed, provenance := false, false, false
+
 	for _, line := range old {
-		if line == "```" {
-			inFence = !inFence
+		if fenced && !closed {
+			// Inside the table.
+			switch {
+			case line == "```":
+				closed = true
+			case isScopeFence(line):
+				return scopeRegion{}, regionError("the table's fence is opened again by %q before it is closed", line)
+			case line == "":
+				return scopeRegion{}, regionError("the table has a blank line inside its fence")
+			case !scopeRowPattern.MatchString(line):
+				return scopeRegion{}, regionError("%q is not a table row", line)
+			default:
+				region.rows = append(region.rows, line)
+			}
 			continue
 		}
-		if !inFence {
-			continue
+
+		// Outside the table: prose, the opening fence, or the provenance line.
+		switch {
+		case isScopeFence(line):
+			if fenced {
+				return scopeRegion{}, regionError("found a second fenced block beside the table")
+			}
+			fenced = true
+		case strings.ContainsAny(line, readmeBarFull+readmeBarEmpty):
+			return scopeRegion{}, regionError("found table rows outside the fence")
+		case isReadmeProvenance(line):
+			if provenance {
+				return scopeRegion{}, regionError("found more than one provenance line")
+			}
+			provenance = true
+		default:
+			region.prose = append(region.prose, line)
 		}
-		label, _, ok := strings.Cut(line, "  ")
-		if !ok || label == TotalPackage {
-			continue
-		}
-		order = append(order, strings.ReplaceAll(label, "/", "_"))
 	}
-	return order
+
+	switch {
+	case fenced && !closed:
+		return scopeRegion{}, regionError("the table's fence is never closed")
+	case fenced && len(region.rows) == 0:
+		return scopeRegion{}, regionError("the table's fence holds no rows")
+	}
+
+	for len(region.prose) > 0 && region.prose[0] == "" {
+		region.prose = region.prose[1:]
+	}
+	for len(region.prose) > 0 && region.prose[len(region.prose)-1] == "" {
+		region.prose = region.prose[:len(region.prose)-1]
+	}
+	return region, nil
+}
+
+// regionError builds a region problem that a caller maps to the configuration
+// exit code, not to "stale".
+func regionError(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrReadmeMarkers, fmt.Sprintf(format, args...))
+}
+
+// isScopeFence reports whether line opens a fenced block.
+func isScopeFence(line string) bool {
+	return line == "```" || line == "```text"
+}
+
+// isReadmeProvenance reports whether line is the generated provenance line.
+func isReadmeProvenance(line string) bool {
+	return strings.HasPrefix(line, readmeProvenancePrefix) && strings.HasSuffix(line, ".")
+}
+
+// scopeRowLabel returns the label column of a table row, or "" when line is not a
+// row.
+func scopeRowLabel(line string) string {
+	match := scopeRowPattern.FindStringSubmatch(line)
+	if match == nil {
+		return ""
+	}
+	return strings.TrimSpace(match[1])
 }
 
 // readmeBar draws the measured percentage as a fixed-width bar, rounding the
@@ -359,29 +459,4 @@ func readmeMilestone(
 		}
 	}
 	return fmt.Sprintf("-> %s%%, then %s%%", targetText, goldText)
-}
-
-// readmeScopeProse returns the lines a repository owns inside the table block:
-// everything outside the fence except the generated provenance line, with the
-// blank edges trimmed. The fenced table itself is always regenerated.
-func readmeScopeProse(old []string) []string {
-	prose := make([]string, 0, len(old))
-	inFence := false
-	for _, line := range old {
-		switch {
-		case line == "```":
-			inFence = !inFence
-		case inFence:
-		case strings.HasPrefix(line, readmeProvenancePrefix) && strings.HasSuffix(line, "."):
-		default:
-			prose = append(prose, line)
-		}
-	}
-	for len(prose) > 0 && prose[0] == "" {
-		prose = prose[1:]
-	}
-	for len(prose) > 0 && prose[len(prose)-1] == "" {
-		prose = prose[:len(prose)-1]
-	}
-	return prose
 }

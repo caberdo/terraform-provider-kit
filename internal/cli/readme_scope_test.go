@@ -182,6 +182,61 @@ func TestRunCoverageReadmeScopeHalfRenderedExitsTwo(t *testing.T) {
 	}
 }
 
+func TestRunCoverageReadmeBareBaselineRejectsAScopeReadme(t *testing.T) {
+	// Finding B: the bare renderer must not rewrite half of a README that also
+	// carries the scope badge pair; that would certify a stale badge as in sync.
+	badge := scopeFixtureRead(t, "gravitino-coverage-badge-block.txt")
+	doc := strings.Replace(readmeDoc, "<!-- coverage:start -->", badge+"\n<!-- coverage:start -->", 1)
+	readme := readmeFile(t, "README.md", doc)
+	baseline := readmeFile(t, "coverage-baseline.txt", "80\n")
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{
+		"coverage", "readme",
+		"--readme", readme,
+		"--baseline", baseline,
+	}, testVersion, &stdout, &stderr)
+
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (stderr = %q)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "coverage-badge:start") {
+		t.Errorf("stderr = %q, want it to name the scope badge marker", stderr.String())
+	}
+	if got := readFile(t, readme); got != doc {
+		t.Errorf("README =\n%s\nwant it unchanged after a marker error", got)
+	}
+}
+
+func TestRunCoverageReadmeScopeMalformedRegionExitsTwo(t *testing.T) {
+	// Finding A: a corrupt table region must exit 2 without writing, rather than
+	// republishing the old rows beside a fresh table.
+	doc := strings.Replace(scopeReadmeDoc(t), "```\n\nMerged statement coverage", "\nMerged statement coverage", 1)
+	if doc == scopeReadmeDoc(t) {
+		t.Fatal("the fixture did not change; the closing fence was not found")
+	}
+	readme := readmeFile(t, "README.md", doc)
+	baseline := readmeFile(t, "coverage-baseline.txt",
+		scopeFixtureRead(t, "gravitino-coverage-baseline.txt"))
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{
+		"coverage", "readme",
+		"--readme", readme,
+		"--baseline", baseline,
+	}, testVersion, &stdout, &stderr)
+
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (stderr = %q)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "inside its fence") {
+		t.Errorf("stderr = %q, want the region diagnosis", stderr.String())
+	}
+	if got := readFile(t, readme); got != doc {
+		t.Errorf("README =\n%s\nwant it unchanged after a region error", got)
+	}
+}
+
 func TestRunCoverageReadmeScopeMalformedBaselineExitsTwo(t *testing.T) {
 	readme := readmeFile(t, "README.md", scopeReadmeDoc(t))
 	baseline := readmeFile(t, "coverage-baseline.txt",

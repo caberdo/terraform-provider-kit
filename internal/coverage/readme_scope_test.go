@@ -410,6 +410,139 @@ func TestCheckScopeReadmeReportsStaleWithoutWriting(t *testing.T) {
 	}
 }
 
+func TestRenderScopeReadmeRejectsMalformedRegions(t *testing.T) {
+	// A region the renderer cannot classify must fail, never be half copied: the
+	// old rows would otherwise be republished beside the generated table, and the
+	// second render would be byte-stable, so --check would bless the duplicate.
+	body := scopeBody(t, "gravitino")
+	badge, block := committedBlocks(t, "gravitino")
+
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "rows outside the fence",
+			body: body + "total       ████░░░░░░░░░░░░░░░░  50.0%   floor 1.0%\n",
+			want: "outside the fence",
+		},
+		{
+			name: "text fence left open",
+			body: "```text\n" + scopeRows(block) + "\n",
+			want: "never closed",
+		},
+		{
+			name: "missing closing fence",
+			body: "```\n" + scopeRows(block) + "\n",
+			want: "never closed",
+		},
+		{
+			name: "second fenced block",
+			body: body + "```\n" + scopeRows(block) + "\n```\n",
+			want: "second fenced block",
+		},
+		{
+			name: "unparseable row inside the fence",
+			body: "```\nThis is not a table row.\n```\n",
+			want: "is not a table row",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			doc := "# Title\n\n" + badge + "\n\nProse.\n\n" +
+				scopeBlockStart + "\n" + test.body + scopeBlockEnd + "\n\nOutro.\n"
+
+			rendered, err := coverage.RenderScopeReadme(
+				[]byte(doc), parseScopeFixture(t, "gravitino"))
+
+			if !errors.Is(err, coverage.ErrReadmeMarkers) {
+				t.Fatalf("RenderScopeReadme() error = %v, want ErrReadmeMarkers", err)
+			}
+			if rendered != nil {
+				t.Errorf("RenderScopeReadme() = %q, want nil on error", rendered)
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Errorf("error = %q, want it to contain %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestRenderScopeReadmeAcceptsATextFence(t *testing.T) {
+	// A complete ```text fence is a table, not prose: it must be regenerated into
+	// the single plain-fenced table the scripts write, proving the rows were
+	// recognised instead of copied.
+	body := scopeBody(t, "gravitino")
+	textBody := "```text" + strings.TrimPrefix(body, "```")
+
+	badge, _ := committedBlocks(t, "gravitino")
+	doc := "# Terraform Provider for gravitino\n" +
+		"\n" +
+		"Statement coverage of this repository, merged from the unit and acceptance profiles:\n" +
+		"\n" +
+		badge +
+		"\n" +
+		"The gate is enforced on every pull request.\n" +
+		"\n" +
+		scopeBlockStart + "\n" + textBody + scopeBlockEnd + "\n" +
+		"\n" +
+		"The floor is enforced: the coverage gate fails a pull request below the baseline.\n"
+
+	rendered, err := coverage.RenderScopeReadme(
+		[]byte(doc), parseScopeFixture(t, "gravitino"))
+	if err != nil {
+		t.Fatalf("RenderScopeReadme() error = %v", err)
+	}
+	if want := scopeReadme(t, "gravitino"); string(rendered) != want {
+		t.Errorf("RenderScopeReadme() =\n%s\nwant:\n%s", rendered, want)
+	}
+}
+
+// scopeBody returns the committed coverage block's lines between its markers.
+func scopeBody(t *testing.T, repo string) string {
+	t.Helper()
+
+	_, block := committedBlocks(t, repo)
+	return strings.TrimSuffix(strings.TrimPrefix(block, scopeBlockStart+"\n"), scopeBlockEnd+"\n")
+}
+
+// scopeRows returns the table rows of a committed block, in order.
+func scopeRows(block string) string {
+	var rows []string
+	for _, line := range strings.Split(block, "\n") {
+		if strings.ContainsRune(line, '█') {
+			rows = append(rows, line)
+		}
+	}
+	return strings.Join(rows, "\n")
+}
+
+func TestRenderScopeReadmeEchoesTheBadgeToken(t *testing.T) {
+	// Both scripts echo the measured token in the badge, so a baseline that
+	// writes `90.0` publishes `coverage-90.0%25`, matching the table's `90.0%`.
+	baseline, err := coverage.ParseScopeBaseline(strings.NewReader(
+		"measured_total=90.0\nfloor_total=89.5\ntarget=80\ngold=90\n"))
+	if err != nil {
+		t.Fatalf("ParseScopeBaseline(): %v", err)
+	}
+
+	rendered, err := coverage.RenderScopeReadme(
+		[]byte(scopeMarkersOnly("(#coverage)")), baseline)
+	if err != nil {
+		t.Fatalf("RenderScopeReadme() error = %v", err)
+	}
+	for _, want := range []string{
+		"coverage-90.0%25-brightgreen",
+		"  90.0%   floor 89.5%",
+	} {
+		if !strings.Contains(string(rendered), want) {
+			t.Errorf("RenderScopeReadme() =\n%s\nwant it to contain %q", rendered, want)
+		}
+	}
+}
+
 func TestCheckScopeReadmeFailsOnAMarkerProblem(t *testing.T) {
 	err := coverage.CheckScopeReadme([]byte("# Title\n\nNo blocks here.\n"), parseScopeFixture(t, "rustfs"))
 

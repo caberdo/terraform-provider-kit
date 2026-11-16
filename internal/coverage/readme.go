@@ -45,6 +45,9 @@ func RenderReadme(doc []byte, baseline float64, gateCommand string) ([]byte, err
 	}
 
 	lines := splitReadmeLines(doc)
+	if err := rejectScopeBadgeMarkers(lines); err != nil {
+		return nil, err
+	}
 	start, end, err := findReadmeMarkers(lines)
 	if err != nil {
 		return nil, err
@@ -94,6 +97,21 @@ func splitReadmeLines(doc []byte) []string {
 // findReadmeMarkers returns the indexes of the single start and end marker.
 func findReadmeMarkers(lines []string) (int, int, error) {
 	return findMarkerPair(lines, readmeStartMarker, readmeEndMarker)
+}
+
+// rejectScopeBadgeMarkers fails a bare-percentage README that also carries the
+// key=value scope badge pair. The bare renderer rewrites only the floor block, so
+// it would leave that pair untouched and --check would then bless a README whose
+// badge can never move again — the same silent staleness the scope renderer
+// refuses in the other direction.
+func rejectScopeBadgeMarkers(lines []string) error {
+	for _, line := range lines {
+		if line == readmeBadgeStartMarker || line == readmeBadgeEndMarker {
+			return fmt.Errorf("%w: found %q, which the bare-percentage dialect does not render",
+				ErrReadmeMarkers, line)
+		}
+	}
+	return nil
 }
 
 // findMarkerPair returns the indexes of the single start and end marker of one
