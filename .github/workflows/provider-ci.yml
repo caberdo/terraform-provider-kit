@@ -12,12 +12,26 @@
 #   docs              inputs.docs-job-name   (default "Generate Docs")
 #   mdvalidate        Validate Markdown Files
 #   dependency-review Dependency Review
-#   versions          inputs.versions-job-name
+#   versions          Supported Versions
 #
 # Do not rename a job or a display name: several rulesets require these
-# contexts. Additive jobs (vuln, coverage, docs, mdvalidate, versions) report as
+# contexts. Additive jobs (vuln, coverage, mdvalidate, versions) report as
 # *skipped* for a provider that does not opt in, and a skipped context satisfies
 # a required check, so they can be added to a ruleset before they do any work.
+# `docs` is additive too, but its work is gated at step level by
+# `env.DOCS_ENABLED` instead of a job-level `if:`, so the job itself has no
+# `if:` and its name is always evaluated.
+#
+# A display name must be static whenever the job can be skipped: GitHub does not
+# evaluate `name:` for a job that does not run, so an input-driven name would
+# surface as the literal expression in the status-check context. `versions` is
+# skipped on pull requests by design, hence the literal `Supported Versions`.
+# `docs` is the only input-driven name left: `docs-job-name` defaults to
+# "Generate Docs", and a caller that needs another literal passes it (openmetadata
+# passes `Docs` because its ruleset requires that string). That is safe only
+# because a running job reports its evaluated name and this job has no `if:`;
+# only a skipped job reports the raw expression. Do not give it an `if:` without
+# first making the name static.
 #
 # The caller must grant `security-events: write` for `lint` and, for
 # `docs-mode: autopr`, `contents: write` + `pull-requests: write` for `docs`.
@@ -245,11 +259,6 @@ on:
         required: false
         type: boolean
         default: false
-      versions-job-name:
-        description: "Display name of the versions job"
-        required: false
-        type: string
-        default: "Supported Versions"
       versions-file:
         description: "Path of the supported-versions file"
         required: false
@@ -793,7 +802,10 @@ jobs:
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
 
   versions:
-    name: ${{ inputs.versions-job-name }}
+    # Static on purpose: this job is skipped on pull requests, and GitHub does
+    # not evaluate `name:` for a skipped job, so an input-driven name would show
+    # up as a literal `inputs.*` context in the ruleset.
+    name: Supported Versions
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Only the acceptance workflow consumes the matrix, and that runs on main.
