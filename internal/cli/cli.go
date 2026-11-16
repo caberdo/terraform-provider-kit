@@ -20,6 +20,7 @@ import (
 	"github.com/caberdo/terraform-provider-kit/internal/branchprotection"
 	"github.com/caberdo/terraform-provider-kit/internal/coverage"
 	"github.com/caberdo/terraform-provider-kit/internal/examples"
+	"github.com/caberdo/terraform-provider-kit/internal/release"
 )
 
 // usage is printed when tfkit is invoked without a subcommand.
@@ -33,6 +34,7 @@ Commands:
   coverage  Work with Go coverage profiles.
   examples  Validate the Terraform examples of a provider.
   branch-protection  Check or install a repository's branch ruleset.
+  release   Check a provider's release metadata.
 
 Run "tfkit <command> -h" for more about a command.
 `
@@ -81,6 +83,16 @@ Environment:
 Run "tfkit branch-protection <command> -h" for more about a command.
 `
 
+// releaseUsage is printed when `tfkit release` has no usable subcommand.
+const releaseUsage = `Usage:
+  tfkit release check [flags]
+
+Commands:
+  check  Verify that VERSION, the changelog and the README agree.
+
+Run "tfkit release <command> -h" for more about a command.
+`
+
 // Exit codes returned by Run.
 const (
 	exitOK      = 0
@@ -111,6 +123,8 @@ func Run(args []string, version string, stdout, stderr io.Writer) int {
 		return runExamples(args[1:], stdout, stderr)
 	case "branch-protection":
 		return runBranchProtection(args[1:], stdout, stderr)
+	case "release":
+		return runRelease(args[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		printUsage(stderr)
@@ -364,6 +378,86 @@ Flags:
 		_, _ = fmt.Fprintf(stderr, "branch-protection setup: %v\n", err)
 		return exitFailure
 	}
+	return exitOK
+}
+
+// runRelease dispatches the release subcommands.
+func runRelease(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		_, _ = fmt.Fprintf(stderr, "release requires a subcommand\n\n")
+		_, _ = io.WriteString(stderr, releaseUsage)
+		return exitUsage
+	}
+
+	switch args[0] {
+	case "check":
+		return runReleaseCheck(args[1:], stdout, stderr)
+	default:
+		_, _ = fmt.Fprintf(stderr, "unknown release command %q\n\n", args[0])
+		_, _ = io.WriteString(stderr, releaseUsage)
+		return exitUsage
+	}
+}
+
+// runReleaseCheck implements `tfkit release check`. It only parses arguments;
+// reading the three files and deciding whether they agree belongs to the
+// release package. Exit codes are the script's: 0 when the metadata is
+// consistent, 1 when it is not (with every problem listed) and 2 for a usage
+// problem or a required file that is missing or unreadable.
+func runReleaseCheck(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("tfkit release check", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	versionFile := flags.String("version-file", release.DefaultVersionFile,
+		"path of the file holding the version being shipped")
+	changelog := flags.String("changelog", release.DefaultChangelog, "path of the changelog")
+	readme := flags.String("readme", release.DefaultReadme,
+		"path of the README carrying the install constraint")
+	flags.Usage = func() {
+		_, _ = io.WriteString(stderr, `usage: tfkit release check [flags]
+
+Verifies that the version in the version file has a dated changelog section and
+that the README installs that minor. Every inconsistency is reported in one run,
+so a release pull request is fixed in one pass.
+
+Exits 0 when the metadata is consistent, 1 when it is not, and 2 when a required
+file is missing or unreadable.
+
+Flags:
+  --version-file  path of the file holding the version (default "VERSION")
+  --changelog     path of the changelog (default "CHANGELOG.md")
+  --readme        path of the README carrying the install constraint
+                  (default "README.md")
+`)
+	}
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitOK
+		}
+		return exitUsage
+	}
+	if flags.NArg() > 0 {
+		flags.Usage()
+		return exitUsage
+	}
+
+	report, err := release.Check(release.Options{
+		VersionFile: *versionFile,
+		Changelog:   *changelog,
+		Readme:      *readme,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "release-check: %v\n", err)
+		return exitUsage
+	}
+	if len(report.Problems) > 0 {
+		for _, problem := range report.Problems {
+			_, _ = fmt.Fprintf(stderr, "release-check: %s\n", problem)
+		}
+		return exitFailure
+	}
+
+	_, _ = fmt.Fprintf(stdout, "release-check: %s=%s, %s and %s agree\n",
+		*versionFile, report.Version, *changelog, *readme)
 	return exitOK
 }
 
