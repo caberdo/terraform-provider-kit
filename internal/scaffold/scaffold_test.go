@@ -87,6 +87,8 @@ var enforced = []string{
 	".github/CODEOWNERS",
 	".github/dependabot.yml",
 	".github/PULL_REQUEST_TEMPLATE.md",
+	"changelog.d/README.md",
+	"changelog.d/.gitkeep",
 	".github/ISSUE_TEMPLATE/bug_report.md",
 	".github/ISSUE_TEMPLATE/feature_request.md",
 }
@@ -1063,5 +1065,68 @@ func TestReportOK(t *testing.T) {
 	report := scaffold.Report{Problems: []scaffold.Problem{{Path: ".editorconfig", Kind: scaffold.Differs}}}
 	if report.OK() {
 		t.Error("a report with a problem is OK")
+	}
+}
+
+// TestRenderRetiresTheVersionFileAndShipsTheFragmentDirectory pins the two
+// release decisions: the version is the last tag, so no file carries it, and
+// every repository has the changelog.d/ convention.
+func TestRenderRetiresTheVersionFileAndShipsTheFragmentDirectory(t *testing.T) {
+	rendered, err := scaffold.Render(scaffoldDir, trinoValues())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	if _, ok := rendered["VERSION"]; ok {
+		t.Error("rendered tree contains VERSION; the version is the last tag")
+	}
+
+	readme, ok := rendered["changelog.d/README.md"]
+	if !ok {
+		t.Fatal("rendered tree has no changelog.d/README.md")
+	}
+	for _, want := range []string{
+		"<issue>-<kind>-<slug>.md",
+		"breaking",
+		"feature",
+		"improvement",
+		"bugfix",
+		"security",
+		"chore",
+	} {
+		if !strings.Contains(string(readme), want) {
+			t.Errorf("changelog.d/README.md does not mention %q", want)
+		}
+	}
+	if _, ok := rendered["changelog.d/.gitkeep"]; !ok {
+		t.Error("rendered tree has no changelog.d/.gitkeep")
+	}
+}
+
+// TestRenderedCallersFollowTheReleaseConventions pins the callers the scaffold
+// generates: the fragment job is on and no caller drains a version file.
+func TestRenderedCallersFollowTheReleaseConventions(t *testing.T) {
+	rendered, err := scaffold.Render(scaffoldDir, trinoValues())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	ci, ok := rendered[".github/workflows/test.yml"]
+	if !ok {
+		t.Fatal("rendered tree has no .github/workflows/test.yml")
+	}
+	if !strings.Contains(string(ci), "changelog-fragments: true") {
+		t.Error("test.yml does not enable changelog-fragments")
+	}
+
+	release, ok := rendered[".github/workflows/release.yml"]
+	if !ok {
+		t.Fatal("rendered tree has no .github/workflows/release.yml")
+	}
+	if strings.Contains(string(release), "version-file:") {
+		t.Error("release.yml still passes a version-file input")
+	}
+	if strings.Contains(string(release), "VERSION") {
+		t.Error("release.yml still mentions a VERSION file")
 	}
 }

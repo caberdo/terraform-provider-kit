@@ -91,9 +91,10 @@ validate-examples: $(TFKIT_DEP)
 generate:
 	go generate ./...
 
-# Fail when the release metadata a release pull request carries is inconsistent.
+# Fail when the changelog and the README disagree with the released version.
+# The released version is the last git tag, so there is no file to keep in sync.
 # The tag workflow enforces the same agreement on main; this keeps the failure
-# in the pull request instead of after the merge.
+# visible before the next release instead of after it.
 release-check: $(TFKIT_DEP)
 	$(TFKIT) release check
 

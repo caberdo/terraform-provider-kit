@@ -89,8 +89,8 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for what the pieces do at runtime.
 
 Terraform type and attribute names are public API: renaming or removing one breaks user state, so it
 does not happen outside a major version. A new attribute is optional (or computed) and documented;
-an incompatible change needs `RequiresReplace()` and a `BREAKING CHANGES` entry in
-[`CHANGELOG.md`](CHANGELOG.md).
+an incompatible change needs `RequiresReplace()` and a `breaking` entry in
+[`changelog.d/`](changelog.d/README.md).
 
 Cite the server behaviour you are encoding (route, status code, payload) in the pull request
 description. A route that exists in the documentation is not proof that a capability works; the
@@ -163,7 +163,8 @@ To raise the floor: update the measured and floor values in `.github/coverage-ba
 4. `make coverage-merge && make coverage-gate` passes, and the coverage floor in
    `.github/coverage-baseline.txt` is raised if the change improved it.
 5. `make scaffold-check` passes, or the deviation is recorded with `--allow <path>:<reason>`.
-6. The change is described in `CHANGELOG.md` under `Unreleased`.
+6. The change has a `changelog.d/` fragment, or the pull request carries the
+   `skip-changelog` label because no user can observe it.
 
 ### Pull request process
 

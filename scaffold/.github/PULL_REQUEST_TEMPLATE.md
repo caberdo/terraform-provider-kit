@@ -37,7 +37,7 @@ Describe how you tested this change:
 
 - [ ] Example added to `examples/` directory (the documentation source)
 - [ ] `make generate` run and the regenerated `docs/` committed
-- [ ] `CHANGELOG.md` updated under `Unreleased`
+- [ ] `changelog.d/` fragment added for a user-visible change
 - [ ] Schema attributes have descriptions
 - [ ] Import section documented (if applicable)
 

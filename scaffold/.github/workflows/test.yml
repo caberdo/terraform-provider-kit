@@ -48,9 +48,13 @@ jobs:
       # acceptance call below.
       versions-file: {{VERSIONS_FILE}}
       packages: {{PACKAGES}}
-      # A release pull request is the only change that moves VERSION: the
-      # changelog check catches a mismatch before the merge instead of after it.
+      # A release pull request is the only change that moves the changelog's
+      # newest section. The released version is the last tag, so the check
+      # compares the changelog and the README against that tag.
       changelog: true
+      # Every pull request that can change what a user sees carries a fragment
+      # in changelog.d/ instead of editing CHANGELOG.md.
+      changelog-fragments: true
       # The generated docs must not drift; `docs-mode: none` keeps the check in
       # the Test job.
       docs: true

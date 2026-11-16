@@ -21,4 +21,5 @@ import "embed"
 //
 //go:embed .editorconfig .gitignore .golangci.yml GNUmakefile LICENSE NOTICE README.md AGENTS.md ARCHITECTURE.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md GOVERNANCE.md ROADMAP.md SUPPORT.md main.go.tmpl
 //go:embed all:.github
+//go:embed all:changelog.d
 var FS embed.FS
