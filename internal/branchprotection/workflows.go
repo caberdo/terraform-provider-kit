@@ -26,6 +26,11 @@ type Job struct {
 	// HasIf reports whether the job is guarded by an if: expression, which lets
 	// GitHub skip it and leave its required check pending.
 	HasIf bool
+	// Condition is the raw if: expression, empty when the job has none.
+	Condition string
+	// HasNeeds reports whether the job declares needs:, so an always() roll-up
+	// has something to summarise.
+	HasNeeds bool
 	// HasMatrix reports whether the job fans out over a strategy matrix, which
 	// makes its check name unstable across runs.
 	HasMatrix bool
@@ -139,7 +144,13 @@ func jobsInFile(path string, gh workflowFetcher, stack map[string]bool) ([]Job, 
 		for _, callee := range called {
 			callee.Name = keyNode.Value + " / " + callee.Name
 			callee.Key = keyNode.Value + " / " + callee.Key
-			// A conditional caller skips every job it delegates to.
+			// A conditional caller skips every job it delegates to. Its own
+			// always() roll-up does not make the delegated checks stable, so
+			// the caller's condition replaces the callee's.
+			if job.HasIf {
+				callee.Condition = ""
+				callee.HasNeeds = false
+			}
 			callee.HasIf = callee.HasIf || job.HasIf
 			callee.HasMatrix = callee.HasMatrix || job.HasMatrix
 			jobs = append(jobs, callee)
@@ -158,7 +169,11 @@ func jobFromNode(keyNode, valueNode *yaml.Node) (Job, error) {
 	if name := mappingValue(valueNode, "name"); name != nil && name.Value != "" {
 		job.Name = name.Value
 	}
-	job.HasIf = mappingValue(valueNode, "if") != nil
+	if condition := mappingValue(valueNode, "if"); condition != nil {
+		job.HasIf = true
+		job.Condition = condition.Value
+	}
+	job.HasNeeds = mappingValue(valueNode, "needs") != nil
 	job.HasMatrix = mappingValue(valueNode, "strategy") != nil
 	return job, nil
 }
@@ -331,6 +346,10 @@ func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
 // name shared by several jobs, a matrix job whose check name changes per
 // combination, an if:-guarded job that may never run, or a reusable workflow
 // caller whose called job names are unknown.
+//
+// An always() roll-up job is the exception among conditional jobs: it depends
+// on needs:, is not itself a matrix, and always() guarantees it reports even
+// when its dependencies fail. That shape is a stable required context.
 func ValidateContexts(jobs []Job, contexts []string) error {
 	for _, context := range contexts {
 		if err := validateContext(jobs, context); err != nil {
@@ -371,8 +390,33 @@ func validateContext(jobs []Job, context string) error {
 			context, job.Key)
 	case job.HasMatrix:
 		return fmt.Errorf("required check %q is a matrix job, so its check names differ per combination", context)
-	case job.HasIf:
-		return fmt.Errorf("required check %q is guarded by if:, so GitHub may skip it and leave the check pending", context)
+	case job.HasIf && !isAlwaysRollUp(job):
+		return fmt.Errorf("required check %q is guarded by if:, so GitHub may skip it and leave the check pending%s",
+			context, conditionalHint(job))
 	}
 	return nil
+}
+
+// isAlwaysRollUp reports whether the job is the shape that makes a conditional
+// job a valid required context: a bare always() over needs: and not a matrix.
+func isAlwaysRollUp(job Job) bool {
+	return job.HasIf && job.HasNeeds && !job.HasMatrix && isBareAlways(job.Condition)
+}
+
+// isBareAlways reports whether condition is exactly always(), possibly wrapped
+// in ${{ }} and ignoring case and surrounding whitespace. A compounded
+// condition such as "always() && x" can still evaluate false, so it does not
+// qualify.
+func isBareAlways(condition string) bool {
+	expression := strings.TrimSpace(condition)
+	expression = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(expression, "${{"), "}}"))
+	return strings.EqualFold(expression, "always()")
+}
+
+// conditionalHint explains the narrow shape that survives validation.
+func conditionalHint(job Job) string {
+	if isBareAlways(job.Condition) && !job.HasNeeds {
+		return " and an always() roll-up also needs needs:, so it has a job to summarise"
+	}
+	return "; only a bare always() roll-up job with needs: and no strategy: reports reliably"
 }
