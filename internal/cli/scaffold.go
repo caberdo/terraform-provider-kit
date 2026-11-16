@@ -102,7 +102,7 @@ func runScaffoldCheck(args []string, stdout, stderr io.Writer) int {
 	upstream := flags.String("upstream", "",
 		"upstream repository whose releases define the version window, as owner/name (required)")
 	repo := flags.String("repo", "",
-		"repository as owner/name (default: derived from `git remote get-url origin`)")
+		"GitHub repository as owner/name (default: derived from `git remote get-url origin`)")
 	license := flags.String("license", defaultLicense,
 		"SPDX licence identifier stated in the generated documents")
 	var allow allowValues
@@ -136,8 +136,8 @@ Flags:
                    (default: the pattern in GNUmakefile)
   --versions-file  supported-versions file (default ".github/<provider>-versions.txt")
   --upstream       upstream repository as owner/name (required)
-  --repo           repository as owner/name
-                   (default: derived from "git remote get-url origin")
+  --repo           GitHub repository as owner/name
+                   (default: derived from "git remote get-url origin"; must be github.com)
   --license        SPDX licence identifier (default "MIT"; rustfs uses "Apache-2.0")
   --allow          exempt a checked file as <path>:<reason> (repeatable)
 `)
@@ -425,8 +425,10 @@ func repoFromGit(root string) (string, error) {
 }
 
 // parseRemote accepts the https, ssh and scp-style spellings git accepts and
-// returns owner/name. A local path is deliberately not accepted: it has no
-// owner, so publishing links from it would be wrong.
+// returns owner/name. The host must be github.com: every rendered URL is a
+// GitHub path, so a GitLab or self-hosted origin would produce wrong links
+// rather than a useful check. A local path is deliberately not accepted: it has
+// no owner either.
 func parseRemote(raw string) (string, error) {
 	cleaned := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(raw), "/"), ".git")
 
@@ -437,11 +439,18 @@ func parseRemote(raw string) (string, error) {
 		if err != nil || parsed.Host == "" {
 			return "", errors.New("not a repository URL")
 		}
+		if !isGitHubHost(parsed.Hostname()) {
+			return "", fmt.Errorf("host %q is not github.com", parsed.Hostname())
+		}
 		repoPath = parsed.Path
 	case strings.HasPrefix(cleaned, "git@"):
-		_, rest, ok := strings.Cut(cleaned, ":")
+		address := strings.TrimPrefix(cleaned, "git@")
+		host, rest, ok := strings.Cut(address, ":")
 		if !ok {
 			return "", errors.New("not an scp-style repository address")
+		}
+		if !isGitHubHost(host) {
+			return "", fmt.Errorf("host %q is not github.com", host)
 		}
 		repoPath = rest
 	default:
@@ -457,6 +466,13 @@ func parseRemote(raw string) (string, error) {
 		return "", fmt.Errorf("owner/name %q is invalid", repo)
 	}
 	return repo, nil
+}
+
+// isGitHubHost reports whether host is github.com, case-insensitively. The
+// whole provider family lives there and every rendered repository URL assumes
+// its path shape.
+func isGitHubHost(host string) bool {
+	return strings.EqualFold(host, "github.com")
 }
 
 // providerFromDir derives the provider name from the repository directory,

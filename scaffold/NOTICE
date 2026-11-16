@@ -13,9 +13,13 @@ GitHub release names the complete dependency inventory of the released binary.
 
 | Upstream work | Licence | What is derived | Distribution |
 |---|---|---|---|
-| HashiCorp `terraform-provider-scaffolding-framework` | MPL-2.0 | The provider build-and-serve pattern. `main.go` is written against the public `providerserver` API; no MPL-2.0 source is copied into it. | Build pattern only |
+| HashiCorp `terraform-provider-scaffolding-framework` | MPL-2.0 | The published `providerserver` entry-point pattern and the build and release configuration this repository follows; `main.go` is written for this repository. | Build pattern and configuration |
 | HashiCorp Terraform plugin libraries | MPL-2.0 | `terraform-plugin-framework`, `terraform-plugin-framework-validators`, `terraform-plugin-go`, `terraform-plugin-log` and `terraform-plugin-testing` are compiled into the provider and its tests; `terraform-plugin-docs` is used at build time to generate `docs/` | Binary and build tooling |
 | `caberdo/terraform-provider-kit` | MIT | The reusable CI, release, coverage and scaffold workflows called from `.github/workflows/`; no Go source code taken | Referenced at run time, not vendored or compiled into the binary |
+
+The entry point follows the published `providerserver` pattern and is written for this
+repository; the build and release configuration follows HashiCorp's scaffolding, and the
+plugin libraries are compiled in and remain MPL-2.0.
 
 ## Licence scope
 
@@ -25,8 +29,9 @@ configuration. It does not relicense third-party material:
 - The workflow configuration under `.github/workflows/` is this project's own thin callers;
   the CI, release and scorecard logic lives in the MIT-licensed reusable workflows from
   `caberdo/terraform-provider-kit` listed above.
-- The HashiCorp plugin libraries and the build-and-serve pattern remain under MPL-2.0; the
-  provider uses them, it does not relicense them.
+- The HashiCorp plugin libraries remain under MPL-2.0 and are compiled into the provider; the
+  build and release configuration follows the scaffolding's MPL-2.0 terms. The provider uses
+  them, it does not relicense them.
 
 The published identifiers are the Go module path `{{MODULE}}` and the Terraform
 Registry namespace `registry.terraform.io/{{REGISTRY_NAMESPACE}}/{{PROVIDER}}`; the

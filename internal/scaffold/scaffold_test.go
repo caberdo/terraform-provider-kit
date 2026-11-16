@@ -2,6 +2,9 @@ package scaffold_test
 
 import (
 	"bytes"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -457,7 +460,7 @@ func TestEmbeddedScaffoldMatchesTheDirectory(t *testing.T) {
 			return err
 		}
 		if !entry.IsDir() {
-			embedded = append(embedded, p)
+			embedded = append(embedded, strings.TrimSuffix(p, ".tmpl"))
 		}
 		return nil
 	})
@@ -569,6 +572,66 @@ func TestRenderSeparatesModuleFromRepositoryURL(t *testing.T) {
 	}
 	if !strings.Contains(documents, "https://github.com/caberdo/terraform-provider-gravitino") {
 		t.Error("the repository URL does not use the REPO value")
+	}
+}
+
+func TestRenderStripsTheTemplateSuffix(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go.tmpl"), []byte("package {{PROVIDER}}\n"), 0o644); err != nil {
+		t.Fatalf("write template: %v", err)
+	}
+
+	rendered, err := scaffold.Render(dir, trinoValues())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if got := string(rendered["main.go"]); got != "package trino\n" {
+		t.Errorf("main.go = %q, want the rendered template", got)
+	}
+	if _, ok := rendered["main.go.tmpl"]; ok {
+		t.Error("the .tmpl suffix survived rendering")
+	}
+}
+
+func TestRenderedMainIsParsableAndCarriesTheAddress(t *testing.T) {
+	for _, fixture := range fixtures {
+		values := trinoValues()
+		if fixture == "rustfs" {
+			values = rustfsValues()
+		}
+
+		rendered, err := scaffold.Render(scaffoldDir, values)
+		if err != nil {
+			t.Fatalf("%s: Render: %v", fixture, err)
+		}
+		main, ok := rendered["main.go"]
+		if !ok {
+			t.Fatalf("%s: rendered tree has no main.go", fixture)
+		}
+		if _, err := format.Source(main); err != nil {
+			t.Errorf("%s: main.go is not gofmt-parsable: %v", fixture, err)
+		}
+		if _, err := parser.ParseFile(token.NewFileSet(), "main.go", main, parser.ParseComments); err != nil {
+			t.Errorf("%s: main.go does not parse: %v", fixture, err)
+		}
+
+		address := "registry.terraform.io/" + values["REGISTRY_NAMESPACE"] + "/" + values["PROVIDER"]
+		constant := "const " + values["PROVIDER"] + "Address = \"" + address + "\""
+		if !bytes.Contains(main, []byte(constant)) {
+			t.Errorf("%s: main.go has no %s", fixture, constant)
+		}
+		for _, fragment := range []string{
+			"//go:generate go run github.com/hashicorp/terraform-plugin-docs",
+			"func run(args []string) error",
+			"flag.NewFlagSet(",
+			"errors.Is(err, flag.ErrHelp)",
+			`var version = "dev"`,
+			"-X main.version",
+		} {
+			if !bytes.Contains(main, []byte(fragment)) {
+				t.Errorf("%s: main.go is missing %q", fixture, fragment)
+			}
+		}
 	}
 }
 

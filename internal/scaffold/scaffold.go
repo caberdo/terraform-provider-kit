@@ -33,6 +33,10 @@ const (
 	// issueTemplateDir holds the issue forms, which are discovered rather than
 	// listed so adding a form to the scaffold adds it to the check.
 	issueTemplateDir = ".github/ISSUE_TEMPLATE"
+	// templateSuffix marks a scaffold file that cannot be stored under its
+	// target name because the Go tool would try to compile it. The renderer
+	// strips the suffix, so main.go.tmpl becomes main.go in a repository.
+	templateSuffix = ".tmpl"
 	// eofMarker names the side of a line comparison that ran out of lines.
 	eofMarker = "(end of file)"
 )
@@ -166,7 +170,8 @@ func renderFS(fsys fs.FS, values map[string]string) (map[string][]byte, error) {
 		if err != nil {
 			return err
 		}
-		name, err := substitute(p, values)
+		target := strings.TrimSuffix(p, templateSuffix)
+		name, err := substitute(target, values)
 		if err != nil {
 			return fmt.Errorf("%s: %w", p, err)
 		}

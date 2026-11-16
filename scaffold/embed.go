@@ -19,6 +19,6 @@ import "embed"
 // The patterns are explicit rather than a single "all:." so that this
 // declaration is the only file in the directory that is not scaffold content.
 //
-//go:embed .editorconfig .gitignore .golangci.yml GNUmakefile LICENSE NOTICE README.md AGENTS.md ARCHITECTURE.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md GOVERNANCE.md ROADMAP.md SUPPORT.md
+//go:embed .editorconfig .gitignore .golangci.yml GNUmakefile LICENSE NOTICE README.md AGENTS.md ARCHITECTURE.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md GOVERNANCE.md ROADMAP.md SUPPORT.md main.go.tmpl
 //go:embed all:.github
 var FS embed.FS

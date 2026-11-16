@@ -1,6 +1,9 @@
 package cli
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseRemoteAcceptsGitSpellings(t *testing.T) {
 	cases := map[string]string{
@@ -29,6 +32,23 @@ func TestParseRemoteRejectsWhatIsNotARepositoryAddress(t *testing.T) {
 	} {
 		if got, err := parseRemote(remote); err == nil {
 			t.Errorf("parseRemote(%q) = %q, want an error", remote, got)
+		}
+	}
+}
+
+func TestParseRemoteRequiresGitHub(t *testing.T) {
+	for _, remote := range []string{
+		"https://gitlab.com/caberdo/terraform-provider-trino.git",
+		"git@gitlab.com:caberdo/terraform-provider-trino.git",
+		"ssh://git@example.com/caberdo/terraform-provider-trino",
+	} {
+		got, err := parseRemote(remote)
+		if err == nil {
+			t.Errorf("parseRemote(%q) = %q, want a non-GitHub host to be rejected", remote, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), "github.com") {
+			t.Errorf("parseRemote(%q) error = %q, want it to name github.com", remote, err)
 		}
 	}
 }

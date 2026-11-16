@@ -416,6 +416,54 @@ func TestRunScaffoldCheckRejectsAnUnparsableRemote(t *testing.T) {
 	}
 }
 
+func TestRunScaffoldCheckRejectsANonGitHubRemote(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+	runGit(t, dir, "remote", "set-url", "origin",
+		"https://gitlab.com/caberdo/terraform-provider-trino.git")
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(scaffoldCheckArgs(), testVersion, &stdout, &stderr)
+
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "gitlab.com") || !strings.Contains(stderr.String(), "--repo") {
+		t.Errorf("stderr = %q, want the offending remote and the --repo escape hatch", stderr.String())
+	}
+}
+
+func TestRunScaffoldCheckAcceptsAValidRepoOverride(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+	runGit(t, dir, "remote", "set-url", "origin",
+		"https://gitlab.com/caberdo/terraform-provider-trino.git")
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(scaffoldCheckArgs("--repo", "caberdo/terraform-provider-trino"),
+		testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 with a valid --repo override (stderr = %q)", code, stderr.String())
+	}
+}
+
+func TestRunScaffoldCheckRejectsANonGitHubRepoFlag(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(scaffoldCheckArgs("--repo", "gitlab.com/caberdo/terraform-provider-trino"),
+		testVersion, &stdout, &stderr)
+
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "--repo") {
+		t.Errorf("stderr = %q, want it to name --repo", stderr.String())
+	}
+}
+
 func TestRunScaffoldCheckEchoesAnUnusedAllowance(t *testing.T) {
 	dir := alignedScaffoldRepo(t)
 	t.Chdir(dir)
