@@ -142,6 +142,33 @@ func TestRunCoverageGateScopeDialectFailsWhenAScopeIsAbsent(t *testing.T) {
 	}
 }
 
+func TestRunCoverageGateScopeDialectFailsClosedOnBackwardsMilestones(t *testing.T) {
+	dir := t.TempDir()
+	stubPackages(t, "internal/a")
+	profile := gateFile(t, dir, "coverage.out", gateProfile(2, 0))
+	baseline := gateFile(t, dir, "baseline.txt", strings.Replace(
+		scopeGateBaseline, "target=80\ngold=90", "target=95\ngold=90", 1))
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{
+		"coverage", "gate",
+		"--profile", profile,
+		"--baseline", baseline,
+	}, testVersion, &stdout, &stderr)
+
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (stderr = %q)", code, stderr.String())
+	}
+	for _, want := range []string{"target", "gold", "95", "90"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want it to name %q", stderr.String(), want)
+		}
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing on a configuration error", stdout.String())
+	}
+}
+
 func TestRunCoverageGateScopeDialectFailsClosedOnAnUnknownPackage(t *testing.T) {
 	dir := t.TempDir()
 	stubPackages(t, "internal/a")

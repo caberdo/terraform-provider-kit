@@ -1,6 +1,7 @@
 package coverage
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -24,8 +25,9 @@ type ScopeResult struct {
 // Every scope the baseline names is reported, in the baseline's order with the
 // module total last, and every scope below its floor is returned in the report.
 // A configuration problem is an error so the caller can fail closed: a scope
-// without a floor or floor without a scope, a percentage outside 0..100, or a
-// scope key that does not resolve to a package `go list` returned.
+// without a floor or floor without a scope, a percentage outside 0..100, a
+// scope key that does not name a package `go list` returned, or two packages
+// whose paths collapse to the same scope key.
 //
 // A declared scope whose package has no statements in the profile is measured
 // at 0 and stays in the report as a failure, rather than being skipped: a scope
@@ -49,6 +51,21 @@ func GateScopes(p Profile, b ScopeBaseline, packages []string) (Report, error) {
 		}
 	}
 
+	// Scope keys are built from the package side, exactly as the shell script
+	// does (`${scope//\//_}`): `internal/datasources/idp_user` and
+	// `internal/client` both round-trip through their key. Synthesising the
+	// package from the key instead would turn an underscore in a directory
+	// name into a path separator and lose the real package.
+	byKey := make(map[string]string, len(packages))
+	for _, pkg := range packages {
+		key := strings.ReplaceAll(pkg, "/", "_")
+		if existing, ok := byKey[key]; ok && existing != pkg {
+			return Report{}, fmt.Errorf(
+				"packages %q and %q both map to the scope key %q", existing, pkg, key)
+		}
+		byKey[key] = pkg
+	}
+
 	// Resolve every scope to the package it measures before looking at the
 	// profile, so a rotted key is reported as the configuration problem it is.
 	paths := make(map[string]string, len(b.Measured))
@@ -62,10 +79,15 @@ func GateScopes(p Profile, b ScopeBaseline, packages []string) (Report, error) {
 		if err := validateScopeValue("measured_"+scope, b.Measured[scope]); err != nil {
 			return Report{}, err
 		}
-		path := scopePath(scope)
-		if !slices.Contains(packages, path) {
-			return Report{}, fmt.Errorf(
-				"scope %q maps to package %q, which the package list does not contain", scope, path)
+		path, ok := byKey[scope]
+		if !ok {
+			message := fmt.Sprintf(
+				"scope %q matches no package returned by go list (scope keys are package paths with %q written as %q)",
+				scope, "/", "_")
+			if candidates := scopeCandidates(byKey, scope); len(candidates) > 0 {
+				message += fmt.Sprintf("; candidates: %s", strings.Join(candidates, ", "))
+			}
+			return Report{}, errors.New(message)
 		}
 		paths[scope] = path
 	}
@@ -201,10 +223,23 @@ func scopeOrder(b ScopeBaseline) []string {
 	return append(order, TotalPackage)
 }
 
-// scopePath renders a scope key as the package it measures. `_` is the path
-// separator in the key, so `internal_client` is `internal/client`.
-func scopePath(scope string) string {
-	return strings.ReplaceAll(scope, "_", "/")
+// scopeCandidates returns up to three scope keys that share a prefix with an
+// unknown scope, so a typo is reported with the keys it might have meant.
+func scopeCandidates(byKey map[string]string, scope string) []string {
+	var candidates []string
+	for key := range byKey {
+		if key == scope {
+			continue
+		}
+		if strings.HasPrefix(key, scope) || strings.HasPrefix(scope, key) {
+			candidates = append(candidates, key)
+		}
+	}
+	slices.Sort(candidates)
+	if len(candidates) > 3 {
+		candidates = candidates[:3]
+	}
+	return candidates
 }
 
 // validateScopeValue rejects a configured percentage the gate cannot compare

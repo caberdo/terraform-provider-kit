@@ -237,6 +237,45 @@ func TestParseScopeBaselineRejectsMalformedFiles(t *testing.T) {
 	}
 }
 
+func TestParseScopeBaselineRequiresTargetBelowGold(t *testing.T) {
+	// A backwards milestone pair renders a sentence that reads "95% first,
+	// then 90%", so it is a configuration error, as in gravitino's script.
+	for _, test := range []struct {
+		name string
+		gold string
+	}{
+		{"target above gold", "90"},
+		{"target equal to gold", "95"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := coverage.ParseScopeBaseline(strings.NewReader(`measured_total=83.4
+floor_total=82.5
+target=95
+gold=` + test.gold + "\n"))
+			if err == nil {
+				t.Fatal("ParseScopeBaseline() error = nil, want a target/gold error")
+			}
+			for _, want := range []string{"95", test.gold} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestParseScopeBaselineAllowsTargetAndGoldToBeOmitted(t *testing.T) {
+	// The milestones are optional here: only a file that names both must keep
+	// them in order.
+	baseline, err := coverage.ParseScopeBaseline(strings.NewReader("measured_total=83.4\nfloor_total=82.5\n"))
+	if err != nil {
+		t.Fatalf("ParseScopeBaseline() error = %v, want the milestones to stay optional", err)
+	}
+	if baseline.Target != 0 || baseline.Gold != 0 {
+		t.Errorf("Target, Gold = %v, %v, want zero when absent", baseline.Target, baseline.Gold)
+	}
+}
+
 func TestScopeDialectDetectsTheFloorKeys(t *testing.T) {
 	// Prose in a comment names `floor_*` too, and must not flip the dialect:
 	// only a real `floor_<scope>=` line does.

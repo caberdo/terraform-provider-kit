@@ -116,6 +116,85 @@ gold=90
 	}
 }
 
+func TestGateScopesResolvesAPackageWhoseDirectoryHasAnUnderscore(t *testing.T) {
+	// `_` in a scope key is not a separator to split on: the key is built from
+	// the package path, so internal/datasources/idp_user is
+	// internal_datasources_idp_user and must not be read as idp/user.
+	profile := coverage.Profile{Mode: "atomic"}
+	scopeBlock(&profile, "github.com/x/y/internal/datasources/idp_user/a.go", 10, 1)
+
+	baseline := scopeBaseline(t, `measured_internal_datasources_idp_user=100
+measured_total=100
+floor_internal_datasources_idp_user=100
+floor_total=100
+target=80
+gold=90
+`)
+
+	report, err := coverage.GateScopes(profile, baseline,
+		[]string{"internal/datasources", "internal/datasources/idp_user"})
+	if err != nil {
+		t.Fatalf("GateScopes() error = %v, want the underscore directory resolved", err)
+	}
+	if len(report.Failures) != 0 {
+		t.Errorf("Failures = %+v, want none", report.Failures)
+	}
+	var found *coverage.ScopeResult
+	for i := range report.Scopes {
+		if report.Scopes[i].Package == "internal/datasources/idp_user" {
+			found = &report.Scopes[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("Scopes = %+v, want the idp_user package reported", report.Scopes)
+	}
+	if got, want := found.Actual, 100.0; got != want {
+		t.Errorf("idp_user coverage = %v, want %v", got, want)
+	}
+}
+
+func TestGateScopesFailsClosedWhenTwoPackagesShareAScopeKey(t *testing.T) {
+	// internal/a/b and internal/a_b both render as internal_a_b. Picking one
+	// silently would gate the wrong package, so the collision is an error.
+	baseline := scopeBaseline(t, `measured_internal_a_b=100
+measured_total=100
+floor_internal_a_b=80
+floor_total=80
+target=80
+gold=90
+`)
+
+	_, err := coverage.GateScopes(scopeMeasure(10, 0), baseline,
+		[]string{"internal/a/b", "internal/a_b"})
+	if err == nil {
+		t.Fatal("GateScopes() error = nil, want a collision error")
+	}
+	for _, want := range []string{"internal/a/b", "internal/a_b"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name %q", err, want)
+		}
+	}
+}
+
+func TestGateScopesSuggestsScopeKeysForATypo(t *testing.T) {
+	baseline := scopeBaseline(t, `measured_internal_client_aut=100
+measured_total=100
+floor_internal_client_aut=80
+floor_total=80
+target=80
+gold=90
+`)
+
+	_, err := coverage.GateScopes(scopeMeasure(10, 0), baseline,
+		[]string{"internal/client", "internal/client/auth"})
+	if err == nil {
+		t.Fatal("GateScopes() error = nil, want an unknown-scope error")
+	}
+	if !strings.Contains(err.Error(), "internal_client_auth") {
+		t.Errorf("error = %q, want it to suggest the nearest scope key", err)
+	}
+}
+
 func TestGateScopesFailsClosedOnAScopeThatIsNotAPackage(t *testing.T) {
 	baseline := scopeBaseline(t, `measured_internal_gone=80
 measured_total=83
@@ -327,7 +406,7 @@ func TestWriteScopeReportMatchesTheGravitinoTable(t *testing.T) {
 func TestWriteScopeReportPrintsTheFailureDetail(t *testing.T) {
 	baselineText := strings.Replace(scopeRenderBaseline, "floor_internal_client=79.0", "floor_internal_client=85.0", 1)
 	baselineText = strings.Replace(baselineText, "floor_total=82.5", "floor_total=95.0", 1)
-	baselineText = strings.Replace(baselineText, "target=80", "target=95", 1)
+	baselineText = strings.Replace(baselineText, "target=80", "target=85", 1)
 
 	got := renderScopeReport(t, baselineText, scopeRenderProfile(),
 		[]string{"internal/client", "internal/helpers"})

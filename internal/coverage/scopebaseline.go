@@ -14,9 +14,12 @@ import (
 // provenance metadata.
 //
 // Measured and Floors are keyed by the scope as written in the file, without
-// its prefix (`internal_client`), not by package (`internal/client`).
-// [TotalPackage] is the whole-module scope. Commit and Date are metadata: they
-// describe the last measurement and are never compared as percentages.
+// its prefix (`internal_client`), not by package (`internal/client`). A key is
+// the package path with `/` written as `_`, so a package whose own directory
+// name contains an underscore keeps it: `internal/datasources/idp_user` is
+// `internal_datasources_idp_user`. [TotalPackage] is the whole-module scope.
+// Commit and Date are metadata: they describe the last measurement and are
+// never compared as percentages.
 type ScopeBaseline struct {
 	Measured map[string]float64
 	Floors   map[string]float64
@@ -51,8 +54,12 @@ type ScopeBaseline struct {
 // here: there must be a `measured_total`, every `measured_<scope>` needs a
 // `floor_<scope>` and every `floor_<scope>` needs a `measured_<scope>`, and
 // every percentage must be a non-negative decimal inside 0..100. The scope
-// itself is `[A-Za-z0-9_]+`; `_` is the path separator, so `internal_client` is
-// the package `internal/client`.
+// itself is `[A-Za-z0-9_]+`: a key is the package path with `/` written as `_`,
+// so `internal_client` is the package `internal/client` and
+// `internal_datasources_idp_user` is `internal/datasources/idp_user`.
+//
+// `target` and `gold` are optional, but when both are present `target` must be
+// below `gold`, or the milestone sentence would read backwards.
 func ParseScopeBaseline(r io.Reader) (ScopeBaseline, error) {
 	baseline := ScopeBaseline{
 		Measured:  map[string]float64{},
@@ -153,6 +160,10 @@ func ParseScopeBaseline(r io.Reader) (ScopeBaseline, error) {
 		if _, ok := baseline.Measured[scope]; !ok {
 			return ScopeBaseline{}, fmt.Errorf("baseline has floor_%s but no measured_%s", scope, scope)
 		}
+	}
+	if baseline.hasTarget && baseline.hasGold && baseline.Target >= baseline.Gold {
+		return ScopeBaseline{}, fmt.Errorf(
+			"baseline needs target (%s) below gold (%s)", baseline.targetText, baseline.goldText)
 	}
 
 	return baseline, nil
