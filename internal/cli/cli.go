@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/caberdo/terraform-provider-kit/internal/branchprotection"
 	"github.com/caberdo/terraform-provider-kit/internal/coverage"
 	"github.com/caberdo/terraform-provider-kit/internal/examples"
 )
@@ -31,6 +32,7 @@ Commands:
   version   Print the tfkit version.
   coverage  Work with Go coverage profiles.
   examples  Validate the Terraform examples of a provider.
+  branch-protection  Check or install a repository's branch ruleset.
 
 Run "tfkit <command> -h" for more about a command.
 `
@@ -57,6 +59,26 @@ Commands:
   validate  Build this provider and validate every module under examples/.
 
 Run "tfkit examples <command> -h" for more about a command.
+`
+
+// branchProtectionUsage is printed when `tfkit branch-protection` has no usable
+// subcommand.
+const branchProtectionUsage = `Usage:
+  tfkit branch-protection check [flags]
+  tfkit branch-protection setup [flags]
+
+Commands:
+  check  Verify the repository ruleset still requires the checks the workflows report.
+  setup  Install or update the repository ruleset.
+
+Environment:
+  GITHUB_REPOSITORY        default for --repo
+  RULESET_NAME             default for --ruleset (main-protection when unset)
+  REQUIRED_CONTEXTS        comma-separated required status checks
+                           (default "Lint & Security,Test")
+  BRANCH_PROTECTION_SOFT   "1" turns an unreadable ruleset into a warning
+
+Run "tfkit branch-protection <command> -h" for more about a command.
 `
 
 // Exit codes returned by Run.
@@ -87,6 +109,8 @@ func Run(args []string, version string, stdout, stderr io.Writer) int {
 		return runCoverage(args[1:], stdout, stderr)
 	case "examples":
 		return runExamples(args[1:], stdout, stderr)
+	case "branch-protection":
+		return runBranchProtection(args[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		printUsage(stderr)
@@ -194,6 +218,130 @@ Flags:
 			flags.Usage()
 			return exitUsage
 		}
+		return exitFailure
+	}
+	return exitOK
+}
+
+// runBranchProtection dispatches the branch-protection subcommands.
+func runBranchProtection(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		_, _ = fmt.Fprintf(stderr, "branch-protection requires a subcommand\n\n")
+		_, _ = io.WriteString(stderr, branchProtectionUsage)
+		return exitUsage
+	}
+
+	switch args[0] {
+	case "check":
+		return runBranchProtectionCheck(args[1:], stdout, stderr)
+	case "setup":
+		return runBranchProtectionSetup(args[1:], stdout, stderr)
+	default:
+		_, _ = fmt.Fprintf(stderr, "unknown branch-protection command %q\n\n", args[0])
+		_, _ = io.WriteString(stderr, branchProtectionUsage)
+		return exitUsage
+	}
+}
+
+// runBranchProtectionCheck implements `tfkit branch-protection check`. It only
+// parses arguments; auditing the ruleset belongs to the branchprotection
+// package. Exit codes are the script's: 0 on a match, 1 on drift, 3 when the
+// rulesets API cannot be read, and 2 for a configuration problem.
+func runBranchProtectionCheck(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("tfkit branch-protection check", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	repo := flags.String("repo", os.Getenv("GITHUB_REPOSITORY"),
+		"repository as owner/name (default $GITHUB_REPOSITORY, else gh repo view)")
+	ruleset := flags.String("ruleset", os.Getenv("RULESET_NAME"),
+		`ruleset name (default $RULESET_NAME, else "main-protection")`)
+	soft := flags.Bool("soft", os.Getenv("BRANCH_PROTECTION_SOFT") == "1",
+		"warn and exit 0 instead of exiting 3 when the ruleset cannot be read")
+	flags.Usage = func() {
+		_, _ = io.WriteString(stderr, `usage: tfkit branch-protection check [flags]
+
+Verifies that the repository ruleset still requires the status check contexts
+the pull_request workflows report. Exits 0 on a match, 1 on drift and 3 when the
+rulesets API cannot be read (a fork, or a token without administration
+permission).
+
+Flags:
+  --repo      repository as owner/name
+              (default $GITHUB_REPOSITORY, else gh repo view)
+  --ruleset   ruleset name (default $RULESET_NAME, else "main-protection")
+  --soft      warn and exit 0 instead of exiting 3 when the ruleset cannot be
+              read (default $BRANCH_PROTECTION_SOFT=1)
+`)
+	}
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitOK
+		}
+		return exitUsage
+	}
+	if flags.NArg() > 0 {
+		flags.Usage()
+		return exitUsage
+	}
+
+	status, err := branchprotection.Check(branchprotection.CheckOptions{
+		Repo:    *repo,
+		Ruleset: *ruleset,
+		Soft:    *soft,
+		Stdout:  stdout,
+		Stderr:  stderr,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "branch-protection check: %v\n", err)
+		if status == branchprotection.StatusConfig {
+			return exitUsage
+		}
+		return exitFailure
+	}
+	return int(status)
+}
+
+// runBranchProtectionSetup implements `tfkit branch-protection setup`. It only
+// parses arguments; validating the contexts and writing the ruleset belongs to
+// the branchprotection package. A failure exits 1, as the script does.
+func runBranchProtectionSetup(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("tfkit branch-protection setup", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	repo := flags.String("repo", os.Getenv("GITHUB_REPOSITORY"),
+		"repository as owner/name (default $GITHUB_REPOSITORY, else gh repo view)")
+	ruleset := flags.String("ruleset", os.Getenv("RULESET_NAME"),
+		`ruleset name (default $RULESET_NAME, else "main-protection")`)
+	flags.Usage = func() {
+		_, _ = io.WriteString(stderr, `usage: tfkit branch-protection setup [flags]
+
+Installs or updates the repository ruleset. The required contexts are validated
+against the job names in workflows that run on pull_request, so a matrix or
+if:-guarded job is refused before anything is written. The token needs admin
+permission on the repository.
+
+Flags:
+  --repo      repository as owner/name
+              (default $GITHUB_REPOSITORY, else gh repo view)
+  --ruleset   ruleset name (default $RULESET_NAME, else "main-protection")
+`)
+	}
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitOK
+		}
+		return exitUsage
+	}
+	if flags.NArg() > 0 {
+		flags.Usage()
+		return exitUsage
+	}
+
+	if err := branchprotection.Setup(branchprotection.SetupOptions{
+		Repo:    *repo,
+		Ruleset: *ruleset,
+		Stdout:  stdout,
+		Stderr:  stderr,
+	}); err != nil {
+		_, _ = fmt.Fprintf(stderr, "branch-protection setup: %v\n", err)
 		return exitFailure
 	}
 	return exitOK
