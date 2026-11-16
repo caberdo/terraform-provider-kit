@@ -9,15 +9,18 @@ import (
 )
 
 // SetupOptions configures Setup. The zero value is usable: it discovers the
-// repository with gh, reads workflows from the current directory and installs
+// repository with gh, reads workflows from the git checkout root and installs
 // the default policy.
 type SetupOptions struct {
 	// Repo is the repository as owner/name. Empty means GITHUB_REPOSITORY,
 	// then `gh repo view`.
 	Repo string
-	// Root is the checkout holding .github/workflows. Empty means the current
-	// directory.
+	// Root is the checkout holding .github/workflows. Empty means the git
+	// checkout root (`git rev-parse --show-toplevel`), then the current
+	// directory when git cannot answer.
 	Root string
+	// Git discovers the checkout when Root is empty. Empty means NewGit.
+	Git Git
 	// Ruleset is the ruleset name. Empty means RULESET_NAME, then
 	// "main-protection".
 	Ruleset string
@@ -58,7 +61,7 @@ func Setup(opts SetupOptions) error {
 		return err
 	}
 
-	root := resolveRoot(opts.Root)
+	root := resolveRoot(opts.Root, opts.Git)
 	jobs, err := pullRequestJobsFor(root, gh)
 	if err != nil {
 		return fmt.Errorf("read pull request workflows: %w", err)

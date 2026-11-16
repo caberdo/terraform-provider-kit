@@ -223,6 +223,14 @@ Flags:
 	return exitOK
 }
 
+// newBranchProtectionGitHub and newBranchProtectionGit are the seams the
+// branch-protection commands hand to the package. They are variables so the
+// command tests can run without gh or a real checkout.
+var (
+	newBranchProtectionGitHub = branchprotection.NewGitHub
+	newBranchProtectionGit    = branchprotection.NewGit
+)
+
 // runBranchProtection dispatches the branch-protection subcommands.
 func runBranchProtection(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -264,6 +272,10 @@ the pull_request workflows report. Exits 0 on a match, 1 on drift and 3 when the
 rulesets API cannot be read (a fork, or a token without administration
 permission).
 
+Workflows are read from the git checkout root (git rev-parse --show-toplevel),
+falling back to the current directory when git is unavailable, so the command
+works from any directory inside the checkout.
+
 Flags:
   --repo      repository as owner/name
               (default $GITHUB_REPOSITORY, else gh repo view)
@@ -287,6 +299,8 @@ Flags:
 		Repo:    *repo,
 		Ruleset: *ruleset,
 		Soft:    *soft,
+		GitHub:  newBranchProtectionGitHub(),
+		Git:     newBranchProtectionGit(),
 		Stdout:  stdout,
 		Stderr:  stderr,
 	})
@@ -318,6 +332,10 @@ against the job names in workflows that run on pull_request, so a matrix or
 if:-guarded job is refused before anything is written. The token needs admin
 permission on the repository.
 
+Workflows are read from the git checkout root (git rev-parse --show-toplevel),
+falling back to the current directory when git is unavailable, so the command
+works from any directory inside the checkout.
+
 Flags:
   --repo      repository as owner/name
               (default $GITHUB_REPOSITORY, else gh repo view)
@@ -338,6 +356,8 @@ Flags:
 	if err := branchprotection.Setup(branchprotection.SetupOptions{
 		Repo:    *repo,
 		Ruleset: *ruleset,
+		GitHub:  newBranchProtectionGitHub(),
+		Git:     newBranchProtectionGit(),
 		Stdout:  stdout,
 		Stderr:  stderr,
 	}); err != nil {

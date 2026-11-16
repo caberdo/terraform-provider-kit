@@ -3,6 +3,7 @@ package branchprotection
 import (
 	"bytes"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -398,5 +399,80 @@ func TestCheckReportsUnreadableWorkflowsAsAConfigurationError(t *testing.T) {
 	}
 	if status != StatusConfig {
 		t.Errorf("status = %d, want %d", status, StatusConfig)
+	}
+}
+
+// fakeGit is the test double for the checkout-root seam.
+type fakeGit struct {
+	root string
+	err  error
+}
+
+func (f fakeGit) Root() (string, error) {
+	return f.root, f.err
+}
+
+func TestResolveRootUsesTheGitCheckout(t *testing.T) {
+	if got, want := resolveRoot("", fakeGit{root: "/checkout"}), "/checkout"; got != want {
+		t.Errorf("resolveRoot = %q, want %q", got, want)
+	}
+}
+
+func TestResolveRootFallsBackWhenGitCannotAnswer(t *testing.T) {
+	if got, want := resolveRoot("", fakeGit{err: errors.New("not a git repository")}), "."; got != want {
+		t.Errorf("resolveRoot = %q, want %q", got, want)
+	}
+}
+
+func TestResolveRootPrefersAnExplicitRoot(t *testing.T) {
+	if got, want := resolveRoot("/explicit", fakeGit{err: errors.New("must not be consulted")}), "/explicit"; got != want {
+		t.Errorf("resolveRoot = %q, want %q", got, want)
+	}
+}
+
+func TestCheckFromASubdirectoryMatchesTheRoot(t *testing.T) {
+	// The script resolved its tree from its own location, so it worked from any
+	// directory. A check run deep inside the checkout must not report false
+	// drift because the workflows are not below the working directory.
+	root := policyRoot(t)
+	subdirectory := filepath.Join(root, "internal", "provider")
+	if err := os.MkdirAll(subdirectory, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", subdirectory, err)
+	}
+	t.Chdir(subdirectory)
+
+	answers := func() []fakeResponse {
+		return []fakeResponse{
+			{match: "repos/o/r/rulesets/7", stdout: validRulesetJSON},
+			{match: "repos/o/r/rulesets", stdout: `[{"id": 7, "name": "main-protection"}]`},
+		}
+	}
+
+	var subStdout, subStderr bytes.Buffer
+	subStatus, err := Check(CheckOptions{
+		Repo: "o/r", Git: fakeGit{root: root}, GitHub: &fakeGitHub{responses: answers()},
+		Stdout: &subStdout, Stderr: &subStderr,
+	})
+	if err != nil {
+		t.Fatalf("Check from the subdirectory: %v (stderr = %q)", err, subStderr.String())
+	}
+
+	var rootStdout, rootStderr bytes.Buffer
+	rootStatus, err := Check(CheckOptions{
+		Repo: "o/r", Root: root, GitHub: &fakeGitHub{responses: answers()},
+		Stdout: &rootStdout, Stderr: &rootStderr,
+	})
+	if err != nil {
+		t.Fatalf("Check from the root: %v (stderr = %q)", err, rootStderr.String())
+	}
+
+	if subStatus != StatusOK || rootStatus != StatusOK {
+		t.Fatalf("statuses = %d (subdirectory) and %d (root), want %d", subStatus, rootStatus, StatusOK)
+	}
+	if got, want := subStdout.String(), rootStdout.String(); got != want {
+		t.Errorf("stdout from the subdirectory = %q, want the root's %q", got, want)
+	}
+	if subStderr.String() != rootStderr.String() {
+		t.Errorf("stderr from the subdirectory = %q, want the root's %q", subStderr.String(), rootStderr.String())
 	}
 }

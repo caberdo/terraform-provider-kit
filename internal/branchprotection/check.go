@@ -15,8 +15,10 @@ import (
 	"strings"
 )
 
-// Status is the outcome of a branch protection check. The values are the exit
-// codes of the script this command replaces.
+// Status is the outcome of a branch protection check. StatusOK, StatusDrift
+// and StatusUnreadable are the exit codes of the script this command replaces.
+// StatusConfig has no script equivalent: it reports a check that could not run
+// at all, and tfkit maps it to its usage exit code 2.
 type Status int
 
 const (
@@ -77,16 +79,49 @@ func (gh ghClient) Workflow(owner, repo, path, ref string) ([]byte, error) {
 	}, nil)
 }
 
+// Git is the seam through which the checkout root is discovered. The check and
+// setup commands read workflows from the repository, not from wherever the
+// caller happens to stand, so they ask git rather than trusting the working
+// directory.
+type Git interface {
+	// Root returns the absolute path of the current git checkout, or an error
+	// when the working directory is not inside one.
+	Root() (string, error)
+}
+
+// NewGit returns the Git seam that runs git.
+func NewGit() Git {
+	return gitCLI{}
+}
+
+// gitCLI is the production Git seam.
+type gitCLI struct{}
+
+func (gitCLI) Root() (string, error) {
+	out, err := exec.CommandContext(context.Background(), "git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", err
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return "", errors.New("git rev-parse --show-toplevel returned no path")
+	}
+	return root, nil
+}
+
 // CheckOptions configures Check. The zero value is usable: it discovers the
-// repository with gh, looks for workflows in the current directory and applies
+// repository with gh, reads workflows from the git checkout root and applies
 // the default policy.
 type CheckOptions struct {
 	// Repo is the repository as owner/name. Empty means GITHUB_REPOSITORY,
 	// then `gh repo view`.
 	Repo string
-	// Root is the checkout holding .github/workflows. Empty means the current
-	// directory.
+	// Root is the checkout holding .github/workflows. Empty means the git
+	// checkout root (`git rev-parse --show-toplevel`), then the current
+	// directory when git cannot answer.
 	Root string
+	// Git discovers the checkout when Root is empty. Empty means NewGit.
+	Git Git
 	// Ruleset is the ruleset name. Empty means RULESET_NAME, then
 	// "main-protection".
 	Ruleset string
@@ -133,7 +168,7 @@ func Check(opts CheckOptions) (Status, error) {
 		return StatusUnreadable, nil
 	}
 
-	root := resolveRoot(opts.Root)
+	root := resolveRoot(opts.Root, opts.Git)
 	contexts := requiredContexts(opts.Contexts)
 	jobs, err := pullRequestJobsFor(root, gh)
 	if err != nil {
@@ -486,12 +521,20 @@ func trimContexts(contexts []string) []string {
 	return trimmed
 }
 
-// resolveRoot is the checkout the commands read workflows from.
-func resolveRoot(root string) string {
-	if root == "" {
-		return "."
+// resolveRoot is the checkout the commands read workflows from: the explicit
+// root, then the git checkout root, then the working directory when git cannot
+// answer (or is not installed).
+func resolveRoot(root string, git Git) string {
+	if root != "" {
+		return root
 	}
-	return root
+	if git == nil {
+		git = NewGit()
+	}
+	if discovered, err := git.Root(); err == nil && discovered != "" {
+		return discovered
+	}
+	return "."
 }
 
 // resolveRulesetName is the ruleset name, with RULESET_NAME as the environment
