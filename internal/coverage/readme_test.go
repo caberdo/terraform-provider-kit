@@ -11,9 +11,14 @@ import (
 	"github.com/caberdo/terraform-provider-kit/internal/coverage"
 )
 
-// defaultGateCommand is the command the three providers name today. The block
-// must stay byte-identical until the Makefile passes its own value.
-const defaultGateCommand = "./scripts/coverage-gate.sh"
+// currentGateCommand is the command the sentence names now that the shell
+// script it used to name is retired. The -Stale fixtures below still carry the
+// script's old spelling, so a rewrite has to fix the sentence as well as the
+// floor.
+const (
+	currentGateCommand = "make coverage-gate"
+	legacyGateCommand  = "./scripts/coverage-gate.sh"
+)
 
 // The fixtures below are the three READMEs the floor block lives in, with the
 // block deliberately out of date so a rewrite has something to fix. The prose
@@ -28,7 +33,7 @@ var (
 		"<!-- coverage:start -->\n" +
 		"![Coverage floor](https://img.shields.io/badge/coverage%20floor-80%25-green)\n" +
 		"\n" +
-		"The coverage gate fails below **80%** (`./scripts/coverage-gate.sh`).\n" +
+		"The coverage gate fails below **80%** (`make coverage-gate`).\n" +
 		"<!-- coverage:end -->\n" +
 		"\n" +
 		"## Verified unsupported\n" +
@@ -55,7 +60,7 @@ var (
 		"<!-- coverage:start -->\n" +
 		"![Coverage floor](https://img.shields.io/badge/coverage%20floor-80%25-green)\n" +
 		"\n" +
-		"The coverage gate fails below **80%** (`./scripts/coverage-gate.sh`).\n" +
+		"The coverage gate fails below **80%** (`make coverage-gate`).\n" +
 		"<!-- coverage:end -->\n" +
 		"\n" +
 		"## License\n" +
@@ -81,7 +86,7 @@ var (
 		"<!-- coverage:start -->\n" +
 		"![Coverage floor](https://img.shields.io/badge/coverage%20floor-33%25-green)\n" +
 		"\n" +
-		"The coverage gate fails below **33%** (`./scripts/coverage-gate.sh`).\n" +
+		"The coverage gate fails below **33%** (`make coverage-gate`).\n" +
 		"<!-- coverage:end -->\n" +
 		"\n" +
 		"`make coverage` writes the unit profile to `coverage.out`.\n"
@@ -120,34 +125,34 @@ func TestRenderReadmeRewritesFloorBlock(t *testing.T) {
 			name:        "trino",
 			doc:         trinoReadmeStale,
 			baseline:    80,
-			gateCommand: defaultGateCommand,
+			gateCommand: currentGateCommand,
 			want:        trinoReadme,
 		},
 		{
 			name:        "agentgateway drops a trailing .0",
 			doc:         agentgatewayReadmeStale,
 			baseline:    80,
-			gateCommand: defaultGateCommand,
+			gateCommand: currentGateCommand,
 			want:        agentgatewayReadme,
 		},
 		{
 			name:        "openmetadata",
 			doc:         openmetadataReadmeStale,
 			baseline:    33,
-			gateCommand: defaultGateCommand,
+			gateCommand: currentGateCommand,
 			want:        openmetadataReadme,
 		},
 		{
 			name:        "fractional floor with another gate command",
 			doc:         openmetadataReadmeStale,
 			baseline:    83.4,
-			gateCommand: "make coverage-gate",
+			gateCommand: "make coverage-gate-strict",
 			want: "## Coverage\n" +
 				"\n" +
 				"<!-- coverage:start -->\n" +
 				"![Coverage floor](https://img.shields.io/badge/coverage%20floor-83.4%25-green)\n" +
 				"\n" +
-				"The coverage gate fails below **83.4%** (`make coverage-gate`).\n" +
+				"The coverage gate fails below **83.4%** (`make coverage-gate-strict`).\n" +
 				"<!-- coverage:end -->\n" +
 				"\n" +
 				"`make coverage` writes the unit profile to `coverage.out`.\n",
@@ -181,11 +186,11 @@ func TestRenderReadmeFormatsTheFloorWithoutTrailingZeros(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.want, func(t *testing.T) {
-			got := string(renderReadme(t, trinoReadmeStale, test.baseline, defaultGateCommand))
+			got := string(renderReadme(t, trinoReadmeStale, test.baseline, currentGateCommand))
 
 			for _, want := range []string{
 				"![Coverage floor](https://img.shields.io/badge/coverage%20floor-" + test.want + "%25-green)",
-				"The coverage gate fails below **" + test.want + "%** (`" + defaultGateCommand + "`).",
+				"The coverage gate fails below **" + test.want + "%** (`" + currentGateCommand + "`).",
 			} {
 				if !strings.Contains(got, want) {
 					t.Errorf("RenderReadme() =\n%s\nwant it to contain %q", got, want)
@@ -199,7 +204,7 @@ func TestRenderReadmeRejectsAnImpossibleBaseline(t *testing.T) {
 	// A badge that promises a floor the gate cannot enforce is worse than no
 	// badge, so the same 0..100 rule the gate applies is applied here.
 	for _, baseline := range []float64{-1, 100.5, math.NaN()} {
-		_, err := coverage.RenderReadme([]byte(trinoReadme), baseline, defaultGateCommand)
+		_, err := coverage.RenderReadme([]byte(trinoReadme), baseline, currentGateCommand)
 		if err == nil {
 			t.Errorf("baseline %v: RenderReadme() error = nil, want an error", baseline)
 		}
@@ -225,14 +230,14 @@ func TestRenderReadmeIsIdempotent(t *testing.T) {
 		baseline    float64
 		gateCommand string
 	}{
-		{name: "stale", doc: trinoReadmeStale, baseline: 80, gateCommand: defaultGateCommand},
-		{name: "already current", doc: trinoReadme, baseline: 80, gateCommand: defaultGateCommand},
-		{name: "fractional", doc: openmetadataReadmeStale, baseline: 83.4, gateCommand: "make coverage-gate"},
+		{name: "stale", doc: trinoReadmeStale, baseline: 80, gateCommand: currentGateCommand},
+		{name: "already current", doc: trinoReadme, baseline: 80, gateCommand: currentGateCommand},
+		{name: "fractional", doc: openmetadataReadmeStale, baseline: 83.4, gateCommand: "make coverage-gate-strict"},
 		{
 			name:        "no trailing newline",
 			doc:         strings.TrimSuffix(trinoReadmeStale, "\n"),
 			baseline:    80,
-			gateCommand: defaultGateCommand,
+			gateCommand: currentGateCommand,
 		},
 	}
 
@@ -264,10 +269,10 @@ func TestRenderReadmeLeavesTextOutsideMarkersUntouched(t *testing.T) {
 		"## After the block\n" +
 		"\n" +
 		"Trailing prose.\n"
-	doc := prefix + readmeBlockLines(79, defaultGateCommand) + suffix
-	want := prefix + readmeBlockLines(80, defaultGateCommand) + suffix
+	doc := prefix + readmeBlockLines(79, legacyGateCommand) + suffix
+	want := prefix + readmeBlockLines(80, currentGateCommand) + suffix
 
-	got := string(renderReadme(t, doc, 80, defaultGateCommand))
+	got := string(renderReadme(t, doc, 80, currentGateCommand))
 
 	if got != want {
 		t.Errorf("RenderReadme() =\n%q\nwant:\n%q", got, want)
@@ -280,7 +285,7 @@ func TestRenderReadmeTerminatesTheDocument(t *testing.T) {
 	// `print` does.
 	doc := strings.TrimSuffix(trinoReadmeStale, "\n")
 
-	got := string(renderReadme(t, doc, 80, defaultGateCommand))
+	got := string(renderReadme(t, doc, 80, currentGateCommand))
 
 	if got != trinoReadme {
 		t.Errorf("RenderReadme() =\n%q\nwant:\n%q", got, trinoReadme)
@@ -329,7 +334,7 @@ func TestRenderReadmeFailsWhenOnlyOneMarkerIsPresent(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			rendered, err := coverage.RenderReadme([]byte(test.doc), 80, defaultGateCommand)
+			rendered, err := coverage.RenderReadme([]byte(test.doc), 80, currentGateCommand)
 
 			if !errors.Is(err, coverage.ErrReadmeMarkers) {
 				t.Fatalf("RenderReadme() error = %v, want ErrReadmeMarkers", err)
@@ -350,7 +355,7 @@ func TestRenderReadmeFailsWhenThePairIsMissing(t *testing.T) {
 	// The error cannot name the README path: RenderReadme works on a byte
 	// slice, so the caller adds the path. It must still say which markers are
 	// missing, because that is the only diagnosis the user gets.
-	rendered, err := coverage.RenderReadme([]byte(trinoReadme[strings.Index(trinoReadme, "## Verified"):]), 80, defaultGateCommand)
+	rendered, err := coverage.RenderReadme([]byte(trinoReadme[strings.Index(trinoReadme, "## Verified"):]), 80, currentGateCommand)
 
 	if !errors.Is(err, coverage.ErrReadmeMarkers) {
 		t.Fatalf("RenderReadme() error = %v, want ErrReadmeMarkers", err)
@@ -370,7 +375,7 @@ func TestRenderReadmeFailsWhenTheMarkersAreReversed(t *testing.T) {
 	// stale one: swapping them silently would delete the text between them.
 	const doc = "# Title\n\n<!-- coverage:end -->\nstale\n<!-- coverage:start -->\n"
 
-	rendered, err := coverage.RenderReadme([]byte(doc), 80, defaultGateCommand)
+	rendered, err := coverage.RenderReadme([]byte(doc), 80, currentGateCommand)
 
 	if !errors.Is(err, coverage.ErrReadmeMarkers) {
 		t.Fatalf("RenderReadme() error = %v, want ErrReadmeMarkers", err)
@@ -395,7 +400,7 @@ func TestRenderReadmeRejectsAScopeBadgePair(t *testing.T) {
 			"\n"+
 			"<!-- coverage:start -->", 1)
 
-	rendered, err := coverage.RenderReadme([]byte(doc), 80, defaultGateCommand)
+	rendered, err := coverage.RenderReadme([]byte(doc), 80, currentGateCommand)
 
 	if !errors.Is(err, coverage.ErrReadmeMarkers) {
 		t.Fatalf("RenderReadme() error = %v, want ErrReadmeMarkers", err)
@@ -414,7 +419,7 @@ func TestCheckReadmeReportsStale(t *testing.T) {
 	doc := []byte(trinoReadmeStale)
 	before := bytes.Clone(doc)
 
-	err := coverage.CheckReadme(doc, 80, defaultGateCommand)
+	err := coverage.CheckReadme(doc, 80, currentGateCommand)
 
 	if !errors.Is(err, coverage.ErrReadmeStale) {
 		t.Fatalf("CheckReadme() error = %v, want ErrReadmeStale", err)
@@ -425,13 +430,13 @@ func TestCheckReadmeReportsStale(t *testing.T) {
 }
 
 func TestCheckReadmeAcceptsTheCurrentBlock(t *testing.T) {
-	if err := coverage.CheckReadme([]byte(trinoReadme), 80, defaultGateCommand); err != nil {
+	if err := coverage.CheckReadme([]byte(trinoReadme), 80, currentGateCommand); err != nil {
 		t.Errorf("CheckReadme() error = %v, want nil", err)
 	}
 }
 
 func TestCheckReadmeFailsOnAMarkerProblem(t *testing.T) {
-	err := coverage.CheckReadme([]byte("# Title\n\nNo block here.\n"), 80, defaultGateCommand)
+	err := coverage.CheckReadme([]byte("# Title\n\nNo block here.\n"), 80, currentGateCommand)
 
 	if !errors.Is(err, coverage.ErrReadmeMarkers) {
 		t.Errorf("CheckReadme() error = %v, want ErrReadmeMarkers", err)

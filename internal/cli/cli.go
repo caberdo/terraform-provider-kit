@@ -746,15 +746,16 @@ func runCoverageGateScopes(
 
 // runCoverageReadme implements `tfkit coverage readme`. It owns file handling
 // and the messages; rendering and checking the block belongs to the coverage
-// package. The gate command is a flag so the sentence can name `make
-// coverage-gate` once the shell script it names today is retired.
+// package. The sentence names `make coverage-gate` by default, the target every
+// provider ships now that the shell script is retired; --gate-command stays an
+// override for a provider that enforces the floor some other way.
 func runCoverageReadme(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("tfkit coverage readme", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	check := flags.Bool("check", false, "report a stale README instead of rewriting it")
 	readmePath := flags.String("readme", "README.md", "path of the README to update")
 	baselinePath := flags.String("baseline", ".github/coverage-baseline.txt", "path of the statement-coverage baseline")
-	gateCommand := flags.String("gate-command", "./scripts/coverage-gate.sh", "command the emitted sentence names as the coverage gate")
+	gateCommand := flags.String("gate-command", "make coverage-gate", "command the emitted sentence names as the coverage gate")
 	flags.Usage = func() {
 		_, _ = io.WriteString(stderr, `usage: tfkit coverage readme [flags]
 
@@ -763,7 +764,7 @@ Flags:
   --readme        path of the README to update (default "README.md")
   --baseline      path of the statement-coverage baseline (default ".github/coverage-baseline.txt")
   --gate-command  command the emitted sentence names as the gate
-                  (default "./scripts/coverage-gate.sh")
+                  (default "make coverage-gate")
 `)
 	}
 	if err := flags.Parse(args); err != nil {

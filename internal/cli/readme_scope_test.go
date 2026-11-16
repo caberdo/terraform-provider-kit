@@ -74,7 +74,7 @@ func TestRunCoverageReadmeScopeIgnoresTheGateCommand(t *testing.T) {
 		"coverage", "readme", "--check",
 		"--readme", readme,
 		"--baseline", baseline,
-		"--gate-command", "make coverage-gate",
+		"--gate-command", "make coverage-gate-strict",
 	}, testVersion, &stdout, &stderr)
 
 	if code != 0 {
