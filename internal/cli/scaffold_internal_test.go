@@ -86,6 +86,16 @@ func TestParseAllowFileRejectsAPathWithoutASeparator(t *testing.T) {
 	}
 }
 
+func TestParseAllowFileStripsAUTF8BOM(t *testing.T) {
+	entries, err := parseAllowFile("\ufeff.editorconfig: the organisation's editor standard\n")
+	if err != nil {
+		t.Fatalf("parseAllowFile: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Path != ".editorconfig" {
+		t.Fatalf("entries = %+v, want the entry after the BOM", entries)
+	}
+}
+
 func TestPackagePatternFromMakefile(t *testing.T) {
 	cases := map[string]string{
 		"go test -v -cover ./...\n": "./...",

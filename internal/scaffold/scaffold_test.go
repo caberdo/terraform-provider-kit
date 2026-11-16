@@ -3,6 +3,7 @@ package scaffold_test
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"go/format"
 	"go/parser"
 	"go/token"
@@ -140,7 +141,9 @@ func writeTree(t *testing.T, dir string, rendered map[string][]byte) {
 }
 
 // aligned copies a fixture and writes the rendered scaffold over it, which is
-// what a repository that has completed the alignment would look like.
+// what a repository that has completed the alignment would look like. A
+// fixture with .yml issue forms keeps that shape, so the rendered template
+// content is written under .yml and the .md sibling is removed.
 func aligned(t *testing.T, fixture string, values map[string]string) string {
 	t.Helper()
 
@@ -150,7 +153,33 @@ func aligned(t *testing.T, fixture string, values map[string]string) string {
 		t.Fatalf("Render: %v", err)
 	}
 	writeTree(t, dir, rendered)
+	alignIssueForms(t, dir, rendered)
 	return dir
+}
+
+// alignIssueForms mirrors the repository's existing issue-form extension after
+// the rendered tree has been written.
+func alignIssueForms(t *testing.T, dir string, rendered map[string][]byte) {
+	t.Helper()
+
+	forms, err := filepath.Glob(filepath.Join(dir, ".github", "ISSUE_TEMPLATE", "*.yml"))
+	if err != nil {
+		t.Fatalf("list issue forms: %v", err)
+	}
+	for _, form := range forms {
+		name := strings.TrimSuffix(filepath.Base(form), ".yml")
+		canonical, ok := rendered[".github/ISSUE_TEMPLATE/"+name+".md"]
+		if !ok {
+			continue
+		}
+		if err := os.WriteFile(form, canonical, 0o644); err != nil {
+			t.Fatalf("write %s: %v", form, err)
+		}
+		md := filepath.Join(filepath.Dir(form), name+".md")
+		if err := os.Remove(md); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("remove %s: %v", md, err)
+		}
+	}
 }
 
 // problemFor returns the problem for path, or nil.
@@ -163,16 +192,21 @@ func problemFor(report scaffold.Report, path string) *scaffold.Problem {
 	return nil
 }
 
-// assertChecked pins the list of files the checker compares.
-func assertChecked(t *testing.T, report scaffold.Report) {
+// assertChecked pins the list of files the checker compares. The issue templates
+// use the repository's form, which is .yml for the rustfs fixture.
+func assertChecked(t *testing.T, report scaffold.Report, templateExtension string) {
 	t.Helper()
 
-	if len(report.Checked) != len(enforced) {
-		t.Fatalf("Checked = %v, want %d paths", report.Checked, len(enforced))
+	want := append([]string(nil), enforced[:len(enforced)-2]...)
+	for _, name := range []string{"bug_report", "feature_request"} {
+		want = append(want, ".github/ISSUE_TEMPLATE/"+name+templateExtension)
 	}
-	for i, want := range enforced {
-		if report.Checked[i] != want {
-			t.Errorf("Checked[%d] = %q, want %q", i, report.Checked[i], want)
+	if len(report.Checked) != len(want) {
+		t.Fatalf("Checked = %v, want %d paths", report.Checked, len(want))
+	}
+	for i, path := range want {
+		if report.Checked[i] != path {
+			t.Errorf("Checked[%d] = %q, want %q", i, report.Checked[i], path)
 		}
 	}
 }
@@ -213,7 +247,11 @@ func TestFullyAlignedRepositoriesPass(t *testing.T) {
 		if !report.OK() {
 			t.Errorf("%s: aligned repository did not pass: %v", fixture, report.Problems)
 		}
-		assertChecked(t, report)
+		extension := ".md"
+		if fixture == "rustfs" {
+			extension = ".yml"
+		}
+		assertChecked(t, report, extension)
 		if len(report.Allowed) != 0 {
 			t.Errorf("%s: Allowed = %v, want none", fixture, report.Allowed)
 		}
@@ -828,14 +866,14 @@ func TestFixHonoursAllow(t *testing.T) {
 }
 
 // TestFixPlanChangesNothing proves the dry run reports the same work without
-// touching a byte.
+// touching a byte anywhere in the tree.
 func TestFixPlanChangesNothing(t *testing.T) {
 	dir := aligned(t, "trino", trinoValues())
 	path := filepath.Join(dir, ".editorconfig")
 	if err := os.WriteFile(path, []byte("local\n"), 0o644); err != nil {
 		t.Fatalf("write .editorconfig: %v", err)
 	}
-	before := fileDigest(t, path)
+	before := snapshotTree(t, dir)
 
 	planned, err := scaffold.FixPlan(dir, trinoValues(), scaffold.Options{})
 	if err != nil {
@@ -844,8 +882,176 @@ func TestFixPlanChangesNothing(t *testing.T) {
 	if got, want := planned, []string{".editorconfig"}; !slices.Equal(got, want) {
 		t.Errorf("FixPlan = %q, want %q", got, want)
 	}
-	if got := fileDigest(t, path); got != before {
-		t.Error("FixPlan wrote .editorconfig; a dry run must change nothing")
+	after := snapshotTree(t, dir)
+	if len(before) != len(after) {
+		t.Fatalf("file count changed from %d to %d", len(before), len(after))
+	}
+	for path, digest := range before {
+		if after[path] != digest {
+			t.Errorf("%s changed during a dry run", path)
+		}
+	}
+}
+
+// snapshotTree hashes every regular file under dir, keyed by slash path.
+func snapshotTree(t *testing.T, dir string) map[string][sha256.Size]byte {
+	t.Helper()
+
+	snapshot := make(map[string][sha256.Size]byte)
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		snapshot[filepath.ToSlash(relative)] = sha256.Sum256(content)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshot %s: %v", dir, err)
+	}
+	return snapshot
+}
+
+// TestFixReturnsWhatItWroteWhenAWriteIsRefused pins the partial-result
+// contract: an I/O refusal must not hide the files already repaired, and it is
+// reported as ErrFixIO rather than a configuration problem.
+func TestFixReturnsWhatItWroteWhenAWriteIsRefused(t *testing.T) {
+	for _, shape := range []string{"symlink", "directory"} {
+		t.Run(shape, func(t *testing.T) {
+			dir := aligned(t, "trino", trinoValues())
+			if err := os.WriteFile(filepath.Join(dir, ".editorconfig"), []byte("local\n"), 0o644); err != nil {
+				t.Fatalf("write .editorconfig: %v", err)
+			}
+
+			outside := filepath.Join(t.TempDir(), "outside")
+			if err := os.WriteFile(outside, []byte("outside\n"), 0o644); err != nil {
+				t.Fatalf("write outside file: %v", err)
+			}
+			blocked := filepath.Join(dir, ".gitignore")
+			if err := os.Remove(blocked); err != nil {
+				t.Fatalf("remove .gitignore: %v", err)
+			}
+			if shape == "symlink" {
+				if err := os.Symlink(outside, blocked); err != nil {
+					t.Fatalf("symlink .gitignore: %v", err)
+				}
+			} else if err := os.Mkdir(blocked, 0o755); err != nil {
+				t.Fatalf("mkdir .gitignore: %v", err)
+			}
+
+			written, err := scaffold.Fix(dir, trinoValues(), scaffold.Options{})
+			if !errors.Is(err, scaffold.ErrFixIO) {
+				t.Fatalf("Fix error = %v, want ErrFixIO", err)
+			}
+			if got, want := written, []string{".editorconfig"}; !slices.Equal(got, want) {
+				t.Errorf("Fix wrote %q, want the partial list %q", got, want)
+			}
+			content, readErr := os.ReadFile(outside)
+			if readErr != nil {
+				t.Fatalf("read outside file: %v", readErr)
+			}
+			if string(content) != "outside\n" {
+				t.Errorf("outside file = %q, want it untouched", content)
+			}
+		})
+	}
+}
+
+// TestCheckFailsClosedOnASymlinkedEnforcedPath proves comparison does not
+// follow a link out of the repository and accept it as canonical.
+func TestCheckFailsClosedOnASymlinkedEnforcedPath(t *testing.T) {
+	dir := aligned(t, "trino", trinoValues())
+	outside := filepath.Join(t.TempDir(), "editorconfig")
+	content, err := os.ReadFile(filepath.Join(dir, ".editorconfig"))
+	if err != nil {
+		t.Fatalf("read .editorconfig: %v", err)
+	}
+	if err := os.WriteFile(outside, content, 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	path := filepath.Join(dir, ".editorconfig")
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove .editorconfig: %v", err)
+	}
+	if err := os.Symlink(outside, path); err != nil {
+		t.Fatalf("symlink .editorconfig: %v", err)
+	}
+
+	report, err := scaffold.Check(dir, trinoValues(), scaffold.Options{})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	problem := problemFor(report, ".editorconfig")
+	if problem == nil || problem.Kind != scaffold.Missing {
+		t.Errorf("problem = %+v, want a symlinked path reported as Missing", problem)
+	}
+}
+
+// TestCheckAndFixFollowTheRepositoryIssueForm proves a repository that already
+// ships YAML issue forms is checked and repaired as .yml, so fix cannot leave a
+// competing .md sibling behind.
+func TestCheckAndFixFollowTheRepositoryIssueForm(t *testing.T) {
+	dir := aligned(t, "trino", trinoValues())
+	rendered, err := scaffold.Render(scaffoldDir, trinoValues())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	templates := filepath.Join(dir, ".github", "ISSUE_TEMPLATE")
+	for _, name := range []string{"bug_report", "feature_request"} {
+		md := filepath.Join(templates, name+".md")
+		canonical := rendered[".github/ISSUE_TEMPLATE/"+name+".md"]
+		if err := os.Remove(md); err != nil {
+			t.Fatalf("remove %s: %v", md, err)
+		}
+		if err := os.WriteFile(filepath.Join(templates, name+".yml"), canonical, 0o644); err != nil {
+			t.Fatalf("write %s.yml: %v", name, err)
+		}
+	}
+
+	report, err := scaffold.Check(dir, trinoValues(), scaffold.Options{})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !report.OK() {
+		t.Fatalf("Problems = %v, want the .yml forms accepted", report.Problems)
+	}
+	for _, name := range []string{"bug_report", "feature_request"} {
+		yml := ".github/ISSUE_TEMPLATE/" + name + ".yml"
+		if !slices.Contains(report.Checked, yml) {
+			t.Errorf("Checked = %v, want %s", report.Checked, yml)
+		}
+		if slices.Contains(report.Checked, ".github/ISSUE_TEMPLATE/"+name+".md") {
+			t.Errorf("Checked = %v, want no .md sibling for %s", report.Checked, name)
+		}
+	}
+
+	drifted := filepath.Join(templates, "bug_report.yml")
+	if err := os.WriteFile(drifted, []byte("local form\n"), 0o644); err != nil {
+		t.Fatalf("write drifted .yml: %v", err)
+	}
+	written, err := scaffold.Fix(dir, trinoValues(), scaffold.Options{})
+	if err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if got, want := written, []string{".github/ISSUE_TEMPLATE/bug_report.yml"}; !slices.Equal(got, want) {
+		t.Errorf("Fix wrote %q, want %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(templates, "bug_report.md")); !os.IsNotExist(err) {
+		t.Errorf("Fix created bug_report.md (err = %v); the repository uses .yml forms", err)
+	}
+	if report, err := scaffold.Check(dir, trinoValues(), scaffold.Options{}); err != nil || !report.OK() {
+		t.Errorf("Check after Fix = %v, %v; want a clean repository", report.Problems, err)
 	}
 }
 

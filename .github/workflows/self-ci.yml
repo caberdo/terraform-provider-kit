@@ -54,3 +54,39 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+  # A reusable workflow that installs a tfkit without one of the commands it
+  # calls fails at step level, after the caller has already opted in. This job
+  # pins that contract: it installs the exact version declared in
+  # provider-ci.yml and asserts every command the workflows call is listed by
+  # `tfkit --help`.
+  tfkit-commands:
+    name: tfkit Commands
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      # The version is read from the workflow that installs it, so the two
+      # cannot drift apart. A new release with a command removed fails here.
+      - name: Install the pinned tfkit
+        run: |
+          version=$(sed -n 's/^[[:space:]]*TFKIT_VERSION:[[:space:]]*//p' .github/workflows/provider-ci.yml)
+          if [ -z "$version" ]; then
+            echo "no TFKIT_VERSION found in provider-ci.yml" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/bin"
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/caberdo/terraform-provider-kit/cmd/tfkit@"$version"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          echo "TFKIT_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Every command the reusable workflows call is available
+        run: scripts/check-tfkit-commands.sh "$(command -v tfkit)" "$TFKIT_VERSION"

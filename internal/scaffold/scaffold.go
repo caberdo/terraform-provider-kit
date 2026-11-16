@@ -98,6 +98,11 @@ type Allowance struct {
 	Used   bool
 }
 
+// ErrFixIO marks a failure to inspect or replace a file while Fix is applying
+// its plan. It is an I/O refusal, not a configuration problem: the caller
+// should report the partial write list and exit 1, not 2.
+var ErrFixIO = errors.New("fix scaffold file")
+
 // Options configures Check.
 type Options struct {
 	// Allow lists the per-repository exemptions. Each path must name a file
@@ -305,7 +310,7 @@ func Check(root string, values map[string]string, opts Options) (Report, error) 
 		return Report{}, err
 	}
 
-	checked, err := enforcedPaths(rendered)
+	checked, content, err := enforcedFiles(root, rendered)
 	if err != nil {
 		return Report{}, err
 	}
@@ -325,7 +330,7 @@ func Check(root string, values map[string]string, opts Options) (Report, error) 
 	}
 
 	for _, rel := range checked {
-		problem, err := compare(root, rel, rendered[rel])
+		problem, err := compare(root, rel, content[rel])
 		if err != nil {
 			return Report{}, err
 		}
@@ -371,7 +376,7 @@ func fix(root string, values map[string]string, opts Options, apply bool) ([]str
 		return nil, err
 	}
 
-	checked, err := enforcedPaths(rendered)
+	checked, content, err := enforcedFiles(root, rendered)
 	if err != nil {
 		return nil, err
 	}
@@ -395,19 +400,19 @@ func fix(root string, values map[string]string, opts Options, apply bool) ([]str
 		// loop already ranges over the enforced list; the guard keeps a future
 		// refactor from turning Fix into a tree copy.
 		if !contains(enforcedSet, rel) {
-			return nil, fmt.Errorf("refuse to write %s: not an enforced path", rel)
+			return written, fmt.Errorf("refuse to write %s: not an enforced path", rel)
 		}
 
-		problem, err := compare(root, rel, rendered[rel])
+		problem, err := compare(root, rel, content[rel])
 		if err != nil {
-			return nil, err
+			return written, fmt.Errorf("%w: %v", ErrFixIO, err)
 		}
 		if problem == nil {
 			continue
 		}
 		if apply {
-			if err := writeCanonical(root, rel, rendered[rel]); err != nil {
-				return nil, err
+			if err := writeCanonical(root, rel, content[rel]); err != nil {
+				return written, fmt.Errorf("%w: %v", ErrFixIO, err)
 			}
 		}
 		written = append(written, rel)
@@ -437,10 +442,24 @@ func writeCanonical(root, rel string, content []byte) error {
 	return nil
 }
 
-// enforcedPaths returns the literal list plus the issue templates the scaffold
-// carries, and fails when the scaffold is missing a file it claims to enforce.
-func enforcedPaths(rendered map[string][]byte) ([]string, error) {
-	checked := append([]string(nil), enforced...)
+// enforcedFiles returns the paths the check compares and the content each path
+// must carry, in report order.
+//
+// The issue templates follow the repository's existing form: a repository that
+// already ships .yml issue forms is checked and repaired as .yml, with the
+// scaffold's rendered template content, instead of gaining competing .md
+// siblings. A repository with the scaffold's .md forms stays on .md.
+func enforcedFiles(root string, rendered map[string][]byte) ([]string, map[string][]byte, error) {
+	content := make(map[string][]byte, len(enforced))
+	checked := make([]string, 0, len(enforced))
+	for _, rel := range enforced {
+		body, ok := rendered[rel]
+		if !ok {
+			return nil, nil, fmt.Errorf("scaffold has no %q", rel)
+		}
+		checked = append(checked, rel)
+		content[rel] = body
+	}
 
 	templates := make([]string, 0)
 	for p := range rendered {
@@ -450,16 +469,36 @@ func enforcedPaths(rendered map[string][]byte) ([]string, error) {
 	}
 	sort.Strings(templates)
 	if len(templates) == 0 {
-		return nil, fmt.Errorf("scaffold has no %s/* files", issueTemplateDir)
+		return nil, nil, fmt.Errorf("scaffold has no %s/* files", issueTemplateDir)
 	}
-	checked = append(checked, templates...)
 
-	for _, rel := range checked {
-		if _, ok := rendered[rel]; !ok {
-			return nil, fmt.Errorf("scaffold has no %q", rel)
+	extension, err := issueTemplateExtension(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, template := range templates {
+		target := strings.TrimSuffix(template, ".md") + extension
+		checked = append(checked, target)
+		content[target] = rendered[template]
+	}
+	return checked, content, nil
+}
+
+// issueTemplateExtension picks the form the repository already uses. Only .yml
+// is recognised: the two shapes in the provider family are the scaffold's .md
+// template and the GitHub issue form, whose files are .yml.
+func issueTemplateExtension(root string) (string, error) {
+	matches, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(issueTemplateDir), "*.yml"))
+	if err != nil {
+		return "", fmt.Errorf("list %s forms: %w", issueTemplateDir, err)
+	}
+	for _, match := range matches {
+		info, err := os.Lstat(match)
+		if err == nil && info.Mode().IsRegular() {
+			return ".yml", nil
 		}
 	}
-	return checked, nil
+	return ".md", nil
 }
 
 // normalizeAllowances validates the exemptions and indexes them by path. A path
@@ -505,11 +544,13 @@ func normalizePath(value string) (string, error) {
 	return cleaned, nil
 }
 
-// compare reads one enforced path. A path that is absent or not a regular file
-// is missing; a read that fails after that keeps the underlying error.
+// compare reads one enforced path. A path that is absent, a symlink or not a
+// regular file is missing: comparison never follows a link out of the
+// repository, and writing a file through one would overwrite something the
+// checker did not inspect.
 func compare(root, rel string, want []byte) (*Problem, error) {
 	full := filepath.Join(root, filepath.FromSlash(rel))
-	info, err := os.Stat(full)
+	info, err := os.Lstat(full)
 	if errors.Is(err, fs.ErrNotExist) {
 		return &Problem{Path: rel, Kind: Missing}, nil
 	}

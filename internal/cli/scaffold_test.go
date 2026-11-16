@@ -657,6 +657,47 @@ func TestRunScaffoldFixHonoursTheAllowFlag(t *testing.T) {
 	}
 }
 
+func TestRunScaffoldFixReportsPartialWritesAndExitsOne(t *testing.T) {
+	dir := alignedScaffoldRepo(t)
+	t.Chdir(dir)
+	editRepoFile(t, dir, ".editorconfig", "\n# local preference\n")
+
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("outside\n"), 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	blocked := filepath.Join(dir, ".gitignore")
+	if err := os.Remove(blocked); err != nil {
+		t.Fatalf("remove .gitignore: %v", err)
+	}
+	if err := os.Symlink(outside, blocked); err != nil {
+		t.Fatalf("symlink .gitignore: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	args := scaffoldCheckArgs()
+	args[1] = "fix"
+	code := cli.Run(args, testVersion, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("fix exit = %d, want 1 for an I/O refusal (stdout = %q, stderr = %q)",
+			code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "wrote .editorconfig") {
+		t.Errorf("stdout = %q, want the file written before the refusal", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "refuse to overwrite .gitignore") {
+		t.Errorf("stderr = %q, want the refused path", stderr.String())
+	}
+	content, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("read outside file: %v", err)
+	}
+	if string(content) != "outside\n" {
+		t.Errorf("outside file = %q, want it untouched", content)
+	}
+}
+
 func TestRunScaffoldFixDryRunChangesNothing(t *testing.T) {
 	dir := alignedScaffoldRepo(t)
 	t.Chdir(dir)
@@ -800,5 +841,8 @@ func TestRunScaffoldWithoutASubcommand(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "scaffold requires a subcommand") {
 		t.Errorf("stderr = %q, want the dispatch error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "fix") || !strings.Contains(stderr.String(), "--dry-run") {
+		t.Errorf("stderr = %q, want fix and --dry-run in the command list", stderr.String())
 	}
 }

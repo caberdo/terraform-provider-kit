@@ -105,6 +105,8 @@ const scaffoldAllowFile = ".github/scaffold-allow.txt"
 // error, and the error names the file and line: a silently dropped exemption
 // would let drift back in without a record.
 func parseAllowFile(content string) ([]scaffold.Allowance, error) {
+	// An editor may write a UTF-8 BOM; it is not part of the first path.
+	content = strings.TrimPrefix(content, "\ufeff")
 	var entries []scaffold.Allowance
 	for i, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -288,16 +290,21 @@ func runScaffoldCommand(command string, args []string, stdout, stderr io.Writer)
 
 	if command == "fix" {
 		written, err := repairScaffold(parsed.dryRun, values, opts)
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "scaffold-fix: %v\n", err)
-			return exitUsage
-		}
 		verb := "wrote"
 		if parsed.dryRun {
 			verb = "would write"
 		}
 		for _, path := range written {
 			_, _ = fmt.Fprintf(stdout, "scaffold-fix: %s %s\n", verb, path)
+		}
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "scaffold-fix: %v\n", err)
+			// An I/O refusal is a failure, not a usage or configuration
+			// problem: the partial write list above is the evidence.
+			if errors.Is(err, scaffold.ErrFixIO) {
+				return exitFailure
+			}
+			return exitUsage
 		}
 	}
 

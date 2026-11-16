@@ -97,12 +97,16 @@ Run "tfkit release <command> -h" for more about a command.
 // scaffoldUsage is printed when `tfkit scaffold` has no usable subcommand.
 const scaffoldUsage = `Usage:
   tfkit scaffold check [flags]
+  tfkit scaffold fix [flags] [--dry-run]
 
 Commands:
   check  Verify that this repository still matches the canonical scaffold.
+  fix    Write the enforced scaffold files over this repository, then check.
 
 The provider and module are derived from the repository when their flags are
-omitted. A deliberate deviation is recorded with --allow <path>:<reason>.
+omitted. A deliberate deviation is recorded with --allow <path>:<reason> or in
+.github/scaffold-allow.txt. fix accepts --dry-run to print the writes without
+changing a file.
 
 Run "tfkit scaffold <command> -h" for more about a command.
 `
