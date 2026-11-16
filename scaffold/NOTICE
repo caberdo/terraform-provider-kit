@@ -15,7 +15,7 @@ GitHub release names the complete dependency inventory of the released binary.
 |---|---|---|---|
 | HashiCorp `terraform-provider-scaffolding-framework` | MPL-2.0 | The published `providerserver` entry-point pattern and the build and release configuration this repository follows; `main.go` is written for this repository. | Build pattern and configuration |
 | HashiCorp Terraform plugin libraries | MPL-2.0 | `terraform-plugin-framework`, `terraform-plugin-framework-validators`, `terraform-plugin-go`, `terraform-plugin-log` and `terraform-plugin-testing` are compiled into the provider and its tests; `terraform-plugin-docs` is used at build time to generate `docs/` | Binary and build tooling |
-| `caberdo/terraform-provider-kit` | MIT | The reusable CI, release, coverage and scaffold workflows called from `.github/workflows/`; no Go source code taken | Referenced at run time, not vendored or compiled into the binary |
+| `caberdo/terraform-provider-kit` | MIT | The canonical repository scaffold: the entry point (`main.go`), the community files and the workflow configuration it renders | Source (`main.go`) and repository configuration; the workflows are referenced at run time, not vendored or compiled into the binary |
 
 The entry point follows the published `providerserver` pattern and is written for this
 repository; the build and release configuration follows HashiCorp's scaffolding, and the

@@ -30,6 +30,8 @@ var (
 	yearPattern           = regexp.MustCompile(`^[0-9]{4}$`)
 	kitVersionPattern     = regexp.MustCompile(`^(v[0-9]+\.[0-9]+\.[0-9]+|[0-9a-f]{40})$`)
 	ownerNamePattern      = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+	repoOwnerPattern      = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
+	repoNamePattern       = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 	licensePattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+-]*$`)
 	modulePattern         = regexp.MustCompile(`(?m)^module[ \t]+(\S+)[ \t]*$`)
 	goPackageTokenPattern = regexp.MustCompile(`^(\.{1,2}/.*|\.)$`)
@@ -309,8 +311,8 @@ func scaffoldValues(root string, in scaffoldInput) (map[string]string, error) {
 		}
 		repo = derived
 	}
-	if !ownerNamePattern.MatchString(repo) {
-		return nil, fmt.Errorf("--repo %q must be owner/name", repo)
+	if err := validateRepo(repo); err != nil {
+		return nil, fmt.Errorf("--repo %q is invalid: %w (expected owner/name)", repo, err)
 	}
 
 	license := strings.TrimSpace(in.License)
@@ -462,10 +464,31 @@ func parseRemote(raw string) (string, error) {
 		return "", errors.New("no owner/name in the repository address")
 	}
 	repo := parts[len(parts)-2] + "/" + parts[len(parts)-1]
-	if !ownerNamePattern.MatchString(repo) {
-		return "", fmt.Errorf("owner/name %q is invalid", repo)
+	if err := validateRepo(repo); err != nil {
+		return "", err
 	}
 	return repo, nil
+}
+
+// validateRepo checks the two components a GitHub repository path has. The
+// owner is a user or organisation name: letters, digits and hyphens only, with
+// no leading or trailing hyphen. A dot in the owner is the marker of a host
+// that was pasted as owner (gitlab.com/x), which would otherwise render as
+// https://github.com/gitlab.com/x.
+func validateRepo(value string) error {
+	owner, name, ok := strings.Cut(value, "/")
+	if !ok || strings.Contains(name, "/") {
+		return errors.New("must be exactly owner/name")
+	}
+	if !repoOwnerPattern.MatchString(owner) {
+		return fmt.Errorf(
+			"owner %q must be letters, digits and hyphens (no dots, scheme or slash)", owner)
+	}
+	if !repoNamePattern.MatchString(name) {
+		return fmt.Errorf(
+			"repository %q must contain only letters, digits, dots, underscores or hyphens", name)
+	}
+	return nil
 }
 
 // isGitHubHost reports whether host is github.com, case-insensitively. The

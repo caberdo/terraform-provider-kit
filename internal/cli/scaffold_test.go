@@ -448,19 +448,36 @@ func TestRunScaffoldCheckAcceptsAValidRepoOverride(t *testing.T) {
 	}
 }
 
-func TestRunScaffoldCheckRejectsANonGitHubRepoFlag(t *testing.T) {
-	dir := alignedScaffoldRepo(t)
-	t.Chdir(dir)
-
-	var stdout, stderr bytes.Buffer
-	code := cli.Run(scaffoldCheckArgs("--repo", "gitlab.com/caberdo/terraform-provider-trino"),
-		testVersion, &stdout, &stderr)
-
-	if code != 2 {
-		t.Fatalf("exit = %d, want 2", code)
+func TestRunScaffoldCheckValidatesTheRepoFlag(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  int
+	}{
+		{"host pasted as owner", "gitlab.com/terraform-provider-trino", 2},
+		{"scheme and path", "https://github.com/x/y", 2},
+		{"dotted owner", "x.y/z", 2},
+		{"valid", "caberdo/terraform-provider-trino", 0},
 	}
-	if !strings.Contains(stderr.String(), "--repo") {
-		t.Errorf("stderr = %q, want it to name --repo", stderr.String())
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := alignedScaffoldRepo(t)
+			t.Chdir(dir)
+
+			var stdout, stderr bytes.Buffer
+			code := cli.Run(scaffoldCheckArgs("--repo", testCase.value),
+				testVersion, &stdout, &stderr)
+
+			if code != testCase.want {
+				t.Fatalf("exit = %d, want %d (stderr = %q)", code, testCase.want, stderr.String())
+			}
+			if testCase.want == 2 {
+				if !strings.Contains(stderr.String(), "--repo") ||
+					!strings.Contains(stderr.String(), "owner/name") {
+					t.Errorf("stderr = %q, want the value and the expected owner/name shape", stderr.String())
+				}
+			}
+		})
 	}
 }
 
