@@ -43,6 +43,11 @@ on:
         description: "Path of the supported-versions file, ordered ascending"
         required: true
         type: string
+      version:
+        description: "Run exactly this version instead of the versions file; empty uses the file (canary)"
+        required: false
+        type: string
+        default: ""
       version-env:
         description: "Environment variable naming the server version (TRINO_VERSION, RUSTFS_VERSION, ...)"
         required: true
@@ -137,13 +142,30 @@ jobs:
       # Pull requests get the floor plus the newest release (fast signal); main
       # and the merge queue get the whole window. Comments are always stripped,
       # so a file without them (trino) parses exactly as before.
+      #
+      # `version` overrides the file for a single-version canary: the matrix is
+      # that one leg and `latest` names it, so the consumers below need no new
+      # mode. The version probe still asserts the server really reports it.
       - name: Read the supported versions into a JSON array
         id: read
         env:
           EVENT_NAME: ${{ github.event_name }}
+          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          mapfile -t all < <(sed -e 's/#.*//' -e 's/[[:space:]]//g' "${{ inputs.versions-file }}" | grep -v '^$')
+          if [[ -n "$VERSION" ]]; then
+            list=$(jq -c -n --arg version "$VERSION" '[$version]')
+            echo "list=$list" >> "$GITHUB_OUTPUT"
+            echo "latest=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "Matrix for the single version $VERSION: $list"
+            exit 0
+          fi
+          # A read loop rather than mapfile, so the step also runs under the
+          # bash 3.2 a maintainer has locally; the array is identical.
+          all=()
+          while IFS= read -r supported; do
+            all+=("$supported")
+          done < <(sed -e 's/#.*//' -e 's/[[:space:]]//g' "${{ inputs.versions-file }}" | grep -v '^$')
           if [[ ${#all[@]} -eq 0 ]]; then
             echo "no supported ${{ inputs.provider-display }} version found in ${{ inputs.versions-file }}" >&2
             exit 1
