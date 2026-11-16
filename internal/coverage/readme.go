@@ -10,10 +10,16 @@ import (
 )
 
 // The marker pair that bounds the floor block. The lines must match exactly, as
-// the awk script this replaces compared whole lines.
+// the awk script this replaces compared whole lines. The badge pair is shared
+// with the key=value scope dialect; only its body differs.
 const (
 	readmeStartMarker = "<!-- coverage:start -->"
 	readmeEndMarker   = "<!-- coverage:end -->"
+
+	// readmeFloorBadgeAnchor is the section the floor badge links to. The
+	// scope badge keeps whatever link the repository gave it; the floor badge
+	// always points at the section its sentence lives in.
+	readmeFloorBadgeAnchor = "(#testing-and-coverage)"
 )
 
 // ErrReadmeMarkers reports that doc does not carry exactly one coverage marker
@@ -27,12 +33,15 @@ var ErrReadmeMarkers = errors.New("coverage markers are missing or malformed")
 // "the README cannot be rendered".
 var ErrReadmeStale = errors.New("README coverage block is out of date with the baseline")
 
-// RenderReadme returns doc with everything between the coverage markers replaced
-// by the floor block for baseline. The badge URL and the sentence match what the
-// `make coverage-readme` recipe writes, with the gate command supplied by the
-// caller so a provider can name its own target.
+// RenderReadme returns doc with both marker regions replaced by the blocks the
+// bare-percentage dialect publishes: a one-line floor badge in the badge pair
+// and the gate sentence in the coverage pair.
 //
-// Only the marker region changes: every line outside it is copied whole. The
+// Both pairs are required. A README carrying only one of them is reported as
+// [ErrReadmeMarkers] rather than half rendered, because a badge that never
+// moves again is easier to miss than a stale number.
+//
+// Only the marker regions change: every line outside them is copied whole. The
 // result ends with a newline, as the awk script's `print` made it, so a README
 // that had lost its final newline gains one.
 func RenderReadme(doc []byte, baseline float64, gateCommand string) ([]byte, error) {
@@ -45,26 +54,44 @@ func RenderReadme(doc []byte, baseline float64, gateCommand string) ([]byte, err
 	}
 
 	lines := splitReadmeLines(doc)
-	if err := rejectScopeBadgeMarkers(lines); err != nil {
+	badgeStart, badgeEnd, err := findMarkerPair(lines, readmeBadgeStartMarker, readmeBadgeEndMarker)
+	if err != nil {
 		return nil, err
 	}
 	start, end, err := findReadmeMarkers(lines)
 	if err != nil {
 		return nil, err
 	}
+	if badgeStart <= end && start <= badgeEnd {
+		return nil, fmt.Errorf("%w: the %q and %q blocks overlap",
+			ErrReadmeMarkers, readmeBadgeStartMarker, readmeStartMarker)
+	}
 
+	badge := []string{
+		readmeBadgeStartMarker,
+		"[![Coverage floor](https://img.shields.io/badge/coverage%20floor-" + floor + "%25-green)]" +
+			readmeFloorBadgeAnchor,
+		readmeBadgeEndMarker,
+	}
 	block := []string{
 		readmeStartMarker,
-		"![Coverage floor](https://img.shields.io/badge/coverage%20floor-" + floor + "%25-green)",
-		"",
 		"The coverage gate fails below **" + floor + "%** (`" + gateCommand + "`).",
 		readmeEndMarker,
 	}
 
-	rendered := make([]string, 0, len(lines)+len(block))
-	rendered = append(rendered, lines[:start]...)
-	rendered = append(rendered, block...)
-	rendered = append(rendered, lines[end+1:]...)
+	rendered := make([]string, 0, len(lines)+len(badge)+len(block))
+	for i := 0; i < len(lines); i++ {
+		switch i {
+		case badgeStart:
+			rendered = append(rendered, badge...)
+			i = badgeEnd
+		case start:
+			rendered = append(rendered, block...)
+			i = end
+		default:
+			rendered = append(rendered, lines[i])
+		}
+	}
 
 	return []byte(strings.Join(rendered, "\n") + "\n"), nil
 }
@@ -97,21 +124,6 @@ func splitReadmeLines(doc []byte) []string {
 // findReadmeMarkers returns the indexes of the single start and end marker.
 func findReadmeMarkers(lines []string) (int, int, error) {
 	return findMarkerPair(lines, readmeStartMarker, readmeEndMarker)
-}
-
-// rejectScopeBadgeMarkers fails a bare-percentage README that also carries the
-// key=value scope badge pair. The bare renderer rewrites only the floor block, so
-// it would leave that pair untouched and --check would then bless a README whose
-// badge can never move again — the same silent staleness the scope renderer
-// refuses in the other direction.
-func rejectScopeBadgeMarkers(lines []string) error {
-	for _, line := range lines {
-		if line == readmeBadgeStartMarker || line == readmeBadgeEndMarker {
-			return fmt.Errorf("%w: found %q, which the bare-percentage dialect does not render",
-				ErrReadmeMarkers, line)
-		}
-	}
-	return nil
 }
 
 // findMarkerPair returns the indexes of the single start and end marker of one
