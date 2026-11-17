@@ -95,6 +95,7 @@ func TestCanaryCallsAcceptanceForOneVersion(t *testing.T) {
 		"expect-version-env":                 "${{ inputs.expect-version-env }}",
 		"acceptance-compose":                 "${{ inputs.acceptance-compose }}",
 		"compose-file-args":                  "${{ inputs.compose-file-args }}",
+		"packages":                           "${{ inputs.packages }}",
 		"version":                            "${{ needs.upstream.outputs.newest-missing }}",
 		"gate-cell":                          "none",
 		"fail-on-missing-acceptance-profile": "false",
@@ -108,6 +109,51 @@ func TestCanaryCallsAcceptanceForOneVersion(t *testing.T) {
 		if fmt.Sprint(got) != value {
 			t.Errorf("canary with.%s = %v, want %q", key, got, value)
 		}
+	}
+}
+
+// TestFreshnessDeclaresPackages pins the input the caller passes and that the
+// canary forwards it: a repository testing ./... must not be canaried against
+// the ./internal/... default.
+func TestFreshnessDeclaresPackages(t *testing.T) {
+	workflow := readWorkflow(t, "provider-freshness.yml")
+
+	input, ok := workflow.On.WorkflowCall.Inputs["packages"]
+	if !ok {
+		t.Fatal("input packages is not declared")
+	}
+	if input.Type != "string" {
+		t.Errorf("packages type = %q, want string", input.Type)
+	}
+	if input.Default != "./internal/..." {
+		t.Errorf("packages default = %v, want ./internal/...", input.Default)
+	}
+}
+
+// TestScaffoldCallerRunsWeeklyAndPassesTheNewInputs pins the caller the kit
+// ships: one weekly cron, the canary and kit check enabled, and the packages
+// pattern forwarded so a generated repository's canary matches its Test job.
+func TestScaffoldCallerRunsWeeklyAndPassesTheNewInputs(t *testing.T) {
+	raw, err := os.ReadFile("../../scaffold/.github/workflows/version-freshness.yml")
+	if err != nil {
+		t.Fatalf("read the scaffold caller: %v", err)
+	}
+	content := string(raw)
+
+	for _, want := range []string{
+		`- cron: "0 6 * * 1"`,
+		"canary: true",
+		"kit-check: true",
+		"packages: {{PACKAGES}}",
+		"version-env: {{VERSION_ENV}}",
+		"expect-version-env: {{EXPECT_VERSION_ENV}}",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("the scaffold caller does not contain %q", want)
+		}
+	}
+	if strings.Contains(content, `- cron: "0 6 1 * *"`) {
+		t.Error("the scaffold caller still ships the monthly cron")
 	}
 }
 
