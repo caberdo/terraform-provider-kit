@@ -12,6 +12,12 @@
 # lands the change. The caller owns the triggers (`schedule` and
 # `workflow_dispatch`) and must grant `issues: write`; the canary additionally
 # needs `actions: read` to read the failing job's log.
+#
+# Cadence: one weekly cron for the whole workflow (Monday 06:00 UTC). A caller
+# file cannot bind two crons to different jobs, and the maintainer chose weekly
+# for the canary. Re-checking the version window weekly costs one API call and
+# updates the existing issue in place, so the quieter monthly cadence buys
+# nothing while the canary needs to know about a new release within a week.
 name: Provider Version Freshness
 
 on:
@@ -74,6 +80,11 @@ on:
         required: false
         type: string
         default: ""
+      packages:
+        description: "go list pattern the canary's unit profile is produced from (rustfs: ./...)"
+        required: false
+        type: string
+        default: "./internal/..."
       raise-max-map-count:
         description: "Raise vm.max_map_count before the canary (Elasticsearch-backed stacks)"
         required: false
@@ -267,7 +278,7 @@ jobs:
     if: inputs.canary && needs.upstream.outputs.behind == 'true' && needs.upstream.outputs.newest-missing != ''
     permissions:
       contents: read
-    uses: caberdo/terraform-provider-kit/.github/workflows/provider-acceptance.yml@v0.14.0
+    uses: caberdo/terraform-provider-kit/.github/workflows/provider-acceptance.yml@v0.15.0
     with:
       provider: ${{ github.event.repository.name }}
       provider-display: ${{ inputs.provider-display }}
@@ -277,6 +288,7 @@ jobs:
       version: ${{ needs.upstream.outputs.newest-missing }}
       acceptance-compose: ${{ inputs.acceptance-compose }}
       compose-file-args: ${{ inputs.compose-file-args }}
+      packages: ${{ inputs.packages }}
       raise-max-map-count: ${{ inputs.raise-max-map-count }}
       acceptance-timeout: 45
       # A canary must not gate its own unsupported version: the covered floor is
@@ -428,8 +440,8 @@ jobs:
 
   # Compares every pin of the kit in this repository with the kit's newest
   # release. A pin that is behind, a repository that mixes tags, and a pin that
-  # names no tag are all failures; the cadence (monthly) belongs to the caller's
-  # schedule, not to this job.
+  # names no tag are all failures; the cadence (the caller's weekly cron)
+  # belongs to the caller's schedule, not to this job.
   kit:
     name: Check the ${{ inputs.provider-display }} kit pin
     runs-on: ubuntu-latest

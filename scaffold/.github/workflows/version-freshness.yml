@@ -1,19 +1,25 @@
-# Compares the supported {{PRODUCT}} matrix with the upstream release window and
-# opens (or updates) exactly one issue when the matrix lags. It never edits the
-# matrix itself: a human or an agent lands the bump pull request.
+# Monitors the {{PRODUCT}} maintenance window: compares the supported matrix
+# with the upstream releases, canaries the newest release the matrix does not
+# cover, and checks this repository's kit pin. Each job reports at most one
+# labelled issue and closes it when the finding goes away. The workflow never
+# edits the matrix or the pin: the bump stays a decision.
 #
-# The comparison is the reusable workflow in caberdo/terraform-provider-kit.
-name: Version matrix freshness
+# One weekly cron (Monday 06:00 UTC) drives all three jobs. A caller file cannot
+# bind two crons to different jobs, and the maintainer chose weekly for the
+# canary. Re-checking the version window weekly costs one API call and updates
+# the existing issue in place, so the quieter monthly cadence buys nothing.
+name: Version maintenance
 
 on:
   schedule:
-    # Monthly, on the first day at 06:00 UTC.
-    - cron: "0 6 1 * *"
+    # Weekly, Monday at 06:00 UTC.
+    - cron: "0 6 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
   issues: write
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}
@@ -22,11 +28,23 @@ concurrency:
 jobs:
   freshness:
     uses: caberdo/terraform-provider-kit/.github/workflows/provider-freshness.yml@{{KIT_VERSION}}
-    # `issues: write` opens or updates the single stale-matrix issue.
+    # `issues: write` opens or updates one labelled issue per category;
+    # `actions: read` lets the canary report read the failing job's log.
     permissions:
       contents: read
       issues: write
+      actions: read
     with:
       provider-display: {{PRODUCT}}
       versions-file: {{VERSIONS_FILE}}
       upstream: {{UPSTREAM_URL}}
+      # The canary runs the acceptance suite against the newest release the
+      # matrix does not cover, and the kit check reports this repository's pin.
+      canary: true
+      version-env: {{VERSION_ENV}}
+      expect-version-env: {{EXPECT_VERSION_ENV}}
+      # The canary's unit profile must cover the same packages the Test
+      # workflow does; a repository testing ./... would otherwise be canaried
+      # against ./internal/... only.
+      packages: {{PACKAGES}}
+      kit-check: true
