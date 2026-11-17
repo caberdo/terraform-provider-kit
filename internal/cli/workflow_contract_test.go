@@ -24,15 +24,19 @@ type calledWorkflow struct {
 		} `yaml:"workflow_call"`
 	} `yaml:"on"`
 	Jobs map[string]struct {
-		Name        string `yaml:"name"`
-		If          string `yaml:"if"`
+		Name        string         `yaml:"name"`
+		If          string         `yaml:"if"`
+		Uses        string         `yaml:"uses"`
+		Needs       any            `yaml:"needs"`
+		With        map[string]any `yaml:"with"`
 		Concurrency struct {
 			Group            string `yaml:"group"`
 			CancelInProgress bool   `yaml:"cancel-in-progress"`
 		} `yaml:"concurrency"`
 		Steps []struct {
-			Name string `yaml:"name"`
-			Run  string `yaml:"run"`
+			Name string            `yaml:"name"`
+			Run  string            `yaml:"run"`
+			Env  map[string]string `yaml:"env"`
 		} `yaml:"steps"`
 	} `yaml:"jobs"`
 }
