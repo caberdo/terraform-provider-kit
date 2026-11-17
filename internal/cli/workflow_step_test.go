@@ -2,9 +2,11 @@ package cli_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -18,18 +20,23 @@ import (
 
 // ghStub describes what the fake `gh` prints. `releases` is the JSON body of
 // `gh api .../releases`; `issue` is the open issue number `gh issue list`
-// reports, empty when no issue is open.
+// reports, empty when no issue is open. `routes` answers a read call whose
+// arguments contain the key, so one stub can serve the releases API, the tags
+// API and a failed job's log without depending on call order.
 type ghStub struct {
 	releases string
 	issue    string
+	routes   map[string]string
 }
 
 // stepRun is the observable result of one workflow step: the `$GITHUB_OUTPUT`
-// key/value pairs, every `gh` invocation (in order) and the combined log.
+// key/value pairs, every `gh` invocation (in order), the combined log and the
+// exit code.
 type stepRun struct {
-	outputs map[string]string
-	calls   []string
-	log     string
+	outputs  map[string]string
+	calls    []string
+	log      string
+	exitCode int
 }
 
 // runStep extracts the named step's `run` script from a workflow, substitutes
@@ -39,6 +46,22 @@ func runStep(
 	workflow, step string,
 	inputs, env map[string]string,
 	stub ghStub,
+) stepRun {
+	t.Helper()
+
+	return runStepIn(t, "", workflow, step, inputs, env, stub, false)
+}
+
+// runStepIn is runStep for a step that runs against a repository fixture in
+// `workdir` (empty keeps the test process's directory). `expectFailure` turns
+// the step's non-zero exit into the expected outcome instead of a failure: the
+// kit check exits 1 to mark a finding.
+func runStepIn(
+	t *testing.T,
+	workdir, workflow, step string,
+	inputs, env map[string]string,
+	stub ghStub,
+	expectFailure bool,
 ) stepRun {
 	t.Helper()
 
@@ -74,11 +97,25 @@ func runStep(
 		}
 	}
 
-	// The stub answers the two read calls with fixtures and accepts every write
-	// call, recording it so a test can assert what the step did.
-	const ghStubScript = `#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$GH_STUB_LOG"
-if [[ "$1" == "api" ]]; then
+	// The stub answers the routed reads, falls back to the releases fixture for
+	// any other `api` call, and accepts every write call, recording it so a test
+	// can assert what the step did.
+	var stubScript strings.Builder
+	stubScript.WriteString("#!/usr/bin/env bash\n")
+	stubScript.WriteString("printf '%s\\n' \"$*\" >> \"$GH_STUB_LOG\"\n")
+	matches := make([]string, 0, len(stub.routes))
+	for match := range stub.routes {
+		matches = append(matches, match)
+	}
+	sort.Strings(matches)
+	for i, match := range matches {
+		path := filepath.Join(dir, fmt.Sprintf("route-%d.json", i))
+		if err := os.WriteFile(path, []byte(stub.routes[match]), 0o644); err != nil {
+			t.Fatalf("write %s fixture: %v", match, err)
+		}
+		fmt.Fprintf(&stubScript, "case \"$*\" in *'%s'*) cat '%s'; exit 0 ;; esac\n", match, path)
+	}
+	stubScript.WriteString(`if [[ "$1" == "api" ]]; then
   cat "$GH_STUB_API"
   exit 0
 fi
@@ -87,8 +124,8 @@ if [[ "$1 $2" == "issue list" ]]; then
   exit 0
 fi
 exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(ghStubScript), 0o755); err != nil {
+`)
+	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(stubScript.String()), 0o755); err != nil {
 		t.Fatalf("write gh stub: %v", err)
 	}
 
@@ -100,7 +137,7 @@ exit 0
 		"GH_STUB_API="+apiPath,
 		"GH_STUB_ISSUE="+stub.issue,
 	)
-	for key, value := range env {
+	for key, value := range mergeEnv(stepEnvironment(t, workflow, step, inputs), env) {
 		cmdEnv = append(cmdEnv, key+"="+value)
 	}
 
@@ -109,9 +146,19 @@ exit 0
 
 	cmd := exec.CommandContext(ctx, "bash", "-c", script)
 	cmd.Env = cmdEnv
+	if workdir != "" {
+		cmd.Dir = workdir
+	}
 	combined, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("step %q failed: %v\n%s", step, err, combined)
+	exitCode := 0
+	if cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
+	}
+	if err != nil && !expectFailure {
+		t.Fatalf("step %q failed (exit %d): %v\n%s", step, exitCode, err, combined)
+	}
+	if err == nil && expectFailure {
+		t.Fatalf("step %q succeeded, want it to report a finding\n%s", step, combined)
 	}
 
 	outputData, err := os.ReadFile(outputPath)
@@ -139,7 +186,7 @@ exit 0
 		calls = nil
 	}
 
-	return stepRun{outputs: outputs, calls: calls, log: string(combined)}
+	return stepRun{outputs: outputs, calls: calls, log: string(combined), exitCode: exitCode}
 }
 
 // workflowStep returns the `run` script of the step with the given name.
@@ -159,6 +206,46 @@ func workflowStep(t *testing.T, workflow, step string) string {
 	}
 	t.Fatalf("workflow %s has no step named %q", workflow, step)
 	return ""
+}
+
+// stepEnvironment resolves the step's own `env:` block with the same fixture
+// values, so a test does not have to repeat what the workflow already wires.
+// Entries from the GitHub context (`github.token`, `github.repository`, ...)
+// are left to the test, which supplies them explicitly.
+func stepEnvironment(t *testing.T, workflow, step string, inputs map[string]string) map[string]string {
+	t.Helper()
+
+	for _, job := range readWorkflow(t, workflow).Jobs {
+		for _, candidate := range job.Steps {
+			if candidate.Name != step {
+				continue
+			}
+			resolved := map[string]string{}
+			for name, raw := range candidate.Env {
+				for expression, value := range inputs {
+					raw = strings.ReplaceAll(raw, "${{ "+expression+" }}", value)
+				}
+				if strings.Contains(raw, "${{ ") {
+					continue
+				}
+				resolved[name] = raw
+			}
+			return resolved
+		}
+	}
+	return nil
+}
+
+// mergeEnv layers the test's explicit values over the step's own environment.
+func mergeEnv(base, override map[string]string) map[string]string {
+	merged := make(map[string]string, len(base)+len(override))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range override {
+		merged[key] = value
+	}
+	return merged
 }
 
 // withoutEnv drops the named variables so a stale value in the test process

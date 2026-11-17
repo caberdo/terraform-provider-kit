@@ -1,15 +1,16 @@
 # Reusable version-matrix freshness check for the caberdo Terraform providers.
 #
-# Compares the supported-versions file with the newest stable upstream releases
-# and opens (or updates) exactly one issue when the matrix lags, closing it again
-# when the matrix covers those releases. It never edits the matrix itself: a
-# human or an agent lands the bump pull request.
+# Two jobs, each reporting at most one labelled issue that clears itself when
+# the finding goes away:
 #
-# The job exposes `behind` and `newest-missing` as outputs so a canary can test
-# the release the matrix does not support yet.
+#   upstream       compare the versions file with the upstream releases
+#   canary         run the acceptance suite against the newest release the
+#                  matrix does not cover (opt-in, advisory, never required)
 #
-# The caller owns the triggers (`schedule` and `workflow_dispatch`) and must
-# grant `issues: write`.
+# It never edits the versions file or a tag: a human or an agent lands the
+# change. The caller owns the triggers (`schedule` and
+# `workflow_dispatch`) and must grant `issues: write`; the canary additionally
+# needs `actions: read` to read the failing job's log.
 name: Provider Version Freshness
 
 on:
@@ -42,7 +43,36 @@ on:
         required: false
         type: string
         default: "version-matrix"
-
+      canary:
+        description: "Run the acceptance suite against the newest release the matrix does not cover"
+        required: false
+        type: boolean
+        default: false
+      version-env:
+        description: "Environment variable the acceptance suite reads the server version from (TRINO_VERSION, ...)"
+        required: false
+        type: string
+        default: ""
+      expect-version-env:
+        description: "Environment variable in which the suite asserts the version; empty disables the assertion"
+        required: false
+        type: string
+        default: ""
+      acceptance-compose:
+        description: "Command the canary uses to run the acceptance container"
+        required: false
+        type: string
+        default: "docker compose run --rm test"
+      compose-file-args:
+        description: "Arguments between `docker compose` and the subcommand, including a trailing space (rustfs)"
+        required: false
+        type: string
+        default: ""
+      raise-max-map-count:
+        description: "Raise vm.max_map_count before the canary (Elasticsearch-backed stacks)"
+        required: false
+        type: boolean
+        default: false
 permissions:
   contents: read
 
@@ -192,5 +222,180 @@ jobs:
               --repo "$REPO" \
               --title "${{ inputs.provider-display }} version matrix is stale" \
               --label ${{ inputs.issue-label }} \
+              --body-file "$body"
+          fi
+
+  # The canary answers "would the provider still pass on the release we do not
+  # support yet". It is advisory: no job depends on it and it is not a required
+  # check. GitHub does not allow `continue-on-error` or `timeout-minutes` on a
+  # job that calls a reusable workflow, so the hard bound is the acceptance
+  # workflow's own per-leg `acceptance-timeout` (45 minutes) and this job's
+  # failure is reported by `canary-report`, which runs on `always()`.
+  #
+  # A relative `./` path cannot be used here: a reusable workflow resolves it
+  # against the *calling* repository, not against this kit. The literal ref must
+  # be bumped with TFKIT_VERSION in the release commit.
+  canary:
+    name: Canary ${{ inputs.provider-display }} ${{ needs.upstream.outputs.newest-missing }}
+    needs: upstream
+    if: inputs.canary && needs.upstream.outputs.behind == 'true' && needs.upstream.outputs.newest-missing != ''
+    permissions:
+      contents: read
+    uses: caberdo/terraform-provider-kit/.github/workflows/provider-acceptance.yml@v0.14.0
+    with:
+      provider: ${{ github.event.repository.name }}
+      provider-display: ${{ inputs.provider-display }}
+      versions-file: ${{ inputs.versions-file }}
+      version-env: ${{ inputs.version-env }}
+      expect-version-env: ${{ inputs.expect-version-env }}
+      version: ${{ needs.upstream.outputs.newest-missing }}
+      acceptance-compose: ${{ inputs.acceptance-compose }}
+      compose-file-args: ${{ inputs.compose-file-args }}
+      raise-max-map-count: ${{ inputs.raise-max-map-count }}
+      acceptance-timeout: 45
+      # A canary must not gate its own unsupported version: the covered floor is
+      # calibrated on the newest supported server.
+      gate-cell: none
+      fail-on-missing-acceptance-profile: false
+
+  # One issue per category, never one per run: the failure report is edited in
+  # place as the evidence changes, and closed when a later run passes. The
+  # failing packages come from the failed job's own log, so the conclusion is
+  # drawn from evidence rather than from the matrix lag alone.
+  canary-report:
+    name: Report the ${{ inputs.provider-display }} canary
+    needs: [upstream, canary]
+    if: always() && needs.canary.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    steps:
+      - name: Open, update or close the canary issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+          RUN_ID: ${{ github.run_id }}
+          DISPLAY: ${{ inputs.provider-display }}
+          VERSION: ${{ needs.upstream.outputs.newest-missing }}
+          RESULT: ${{ needs.canary.result }}
+        run: |
+          set -euo pipefail
+
+          run_url="$SERVER/$REPO/actions/runs/$RUN_ID"
+
+          # One open issue per category, found by label, not by title: the title
+          # carries the version and therefore changes between runs.
+          open_issue() {
+            gh issue list \
+              --repo "$REPO" \
+              --label canary-failure \
+              --state open \
+              --json number \
+              --jq '.[0].number // empty'
+          }
+
+          if [[ "$RESULT" == "skipped" || "$RESULT" == "cancelled" ]]; then
+            echo "The canary did not run ($RESULT); nothing to report."
+            exit 0
+          fi
+
+          if [[ "$RESULT" == "success" ]]; then
+            existing=$(open_issue)
+            if [[ -n "$existing" ]]; then
+              gh issue comment "$existing" \
+                --repo "$REPO" \
+                --body "The $DISPLAY canary passes on \`$VERSION\`: the bump looks mechanical (a matrix-only edit), so this issue is closing."
+              gh issue close "$existing" --repo "$REPO"
+              echo "Closed issue #$existing."
+            fi
+            exit 0
+          fi
+
+          # Failure: pull the failed jobs' logs. A log that is not available yet
+          # is a warning, not a reason to stay silent: the issue is still the
+          # report, it just carries less evidence.
+          jobs=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" --paginate --slurp)
+          failed_jobs=$(printf '%s' "$jobs" | jq -r '.[].jobs[] | select(.conclusion == "failure") | .id')
+
+          log=$(mktemp)
+          while IFS= read -r job; do
+            if [[ -z "$job" ]]; then
+              continue
+            fi
+            if ! gh api "repos/$REPO/actions/jobs/$job/logs" >> "$log"; then
+              echo "warning: the log for job $job is not available yet" >&2
+            fi
+          done <<< "$failed_jobs"
+
+          failed_tests=$(grep -oE -- '--- FAIL: [A-Za-z0-9_/]+' "$log" | sed 's/^--- FAIL: //' | sort -u | head -n 20 || true)
+          failed_packages=$(awk '{ for (i = 1; i < NF; i++) if ($i == "FAIL") print $(i + 1) }' "$log" | sort -u | head -n 20)
+
+          # The conclusion is only stated when the log supports it. A version
+          # assertion that fails may be the canary's own probe (the image tag is
+          # wrong) or a provider test; that is not enough to call the bump
+          # either way, so it is reported as an open question instead.
+          if grep -qF -- '[build failed]' "$log"; then
+            conclusion="**code change needed** — the provider does not build against \`$VERSION\`; the build failure is in the run log."
+          elif [[ -n "$failed_tests" ]]; then
+            if [[ -z "$(printf '%s\n' "$failed_tests" | grep -vi 'version' || true)" ]]; then
+              conclusion="**No conclusion yet** — every failing test is a version assertion. Check the image tag and the expected version first: a matrix-only bump and a code change are both possible."
+            else
+              conclusion="**code change needed** — acceptance tests fail on behaviour, not on the version itself."
+            fi
+          elif [[ -n "$failed_packages" ]]; then
+            conclusion="**No conclusion yet** — the log names failing packages but no failing test; read the run log before deciding."
+          else
+            conclusion="**No conclusion yet** — the log names no failing Go test or package, so the failure is in the stack, the image or the environment. The bump may still be mechanical."
+          fi
+
+          body=$(mktemp)
+          {
+            echo "<!-- kit canary report -->"
+            echo "The \`$DISPLAY\` canary failed on \`$VERSION\`, a release the matrix does not cover yet."
+            echo
+            echo "**Run:** $run_url"
+            echo
+            echo "**Failing packages**"
+            if [[ -n "$failed_packages" ]]; then
+              while IFS= read -r package; do
+                echo "- \`$package\`"
+              done <<< "$failed_packages"
+            else
+              echo "The log did not name a failing Go package."
+            fi
+            echo
+            echo "**Failing tests**"
+            if [[ -n "$failed_tests" ]]; then
+              while IFS= read -r test; do
+                echo "- \`$test\`"
+              done <<< "$failed_tests"
+            else
+              echo "The log did not name a failing test."
+            fi
+            echo
+            echo "**Conclusion**"
+            echo "$conclusion"
+            echo
+            echo "This workflow never edits the matrix; the bump stays a decision."
+          } > "$body"
+
+          gh label create canary-failure \
+            --description "$DISPLAY canary failure" \
+            --color b60205 2>/dev/null || true
+
+          existing=$(open_issue)
+          title="$DISPLAY canary fails on $VERSION"
+          if [[ -n "$existing" ]]; then
+            gh issue edit "$existing" --repo "$REPO" --title "$title" --body-file "$body"
+            echo "Updated issue #$existing."
+          else
+            gh issue create \
+              --repo "$REPO" \
+              --title "$title" \
+              --label canary-failure \
               --body-file "$body"
           fi
