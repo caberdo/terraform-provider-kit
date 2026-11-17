@@ -77,6 +77,8 @@ The kit owns the canonical repository scaffold; `tfkit scaffold check` reports w
 
    Review the diff, not just the exit code. If a file's prose carries a provider-specific answer (a security contact, a support route, an authentication prompt), restore that answer and record the path in the allow list rather than accepting the generic text. A repository with substantial provider-specific prose should expect to allow-list roughly 8–11 of the 15 enforced paths.
 
+   `CODE_OF_CONDUCT.md` names its enforcement contact with `{{CONDUCT_CONTACT}}`. The scaffold default is `conduct@caberdo.nl`; pass `--conduct-contact <address>` when adopting, or replace the address in the rendered file, so conduct reports reach the repository's own maintainers.
+
 4. **Commit the result and enable the job in report-only mode.** The caller's `uses:` pin must move to the release that carries the `scaffold` job (v0.13.0 or later); an older pin has no such job:
 
    ```yaml

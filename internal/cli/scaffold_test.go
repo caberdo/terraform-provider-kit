@@ -30,6 +30,7 @@ func scaffoldFixtureValues() map[string]string {
 		"REGISTRY_NAMESPACE": "caberdo",
 		"YEAR":               "2026",
 		"COPYRIGHT":          "Dennis de Jong",
+		"CONDUCT_CONTACT":    "conduct@caberdo.nl",
 		"KIT_VERSION":        scaffoldKitVersion,
 		"PACKAGES":           "./internal/...",
 		"VERSIONS_FILE":      ".github/trino-versions.txt",
@@ -52,6 +53,7 @@ func scaffoldRustfsValues() map[string]string {
 		"REGISTRY_NAMESPACE": "caberdo",
 		"YEAR":               "2026",
 		"COPYRIGHT":          "Dennis de Jong",
+		"CONDUCT_CONTACT":    "conduct@caberdo.nl",
 		"KIT_VERSION":        scaffoldKitVersion,
 		"PACKAGES":           "./...",
 		"VERSIONS_FILE":      ".github/rustfs-versions.txt",
@@ -82,7 +84,7 @@ func alignedRepo(t *testing.T, dirName string, values map[string]string) string 
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			t.Fatalf("mkdir for %s: %v", path, err)
 		}
-		if err := os.WriteFile(full, content, 0o644); err != nil {
+		if err := os.WriteFile(full, content, scaffold.CanonicalMode(path)); err != nil {
 			t.Fatalf("write %s: %v", path, err)
 		}
 	}
@@ -188,6 +190,21 @@ func TestRunScaffoldCheckPassesAnAlignedRepository(t *testing.T) {
 	}
 	if stderr.String() != "" {
 		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunScaffoldCheckUsesTheConductContactFlag(t *testing.T) {
+	values := scaffoldFixtureValues()
+	values["CONDUCT_CONTACT"] = "conduct@trino.example"
+	dir := alignedRepo(t, "terraform-provider-trino", values)
+	t.Chdir(dir)
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(scaffoldCheckArgs("--conduct-contact", "conduct@trino.example"),
+		testVersion, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr = %q)", code, stderr.String())
 	}
 }
 

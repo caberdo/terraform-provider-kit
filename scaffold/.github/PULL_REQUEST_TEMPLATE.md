@@ -62,3 +62,7 @@ Describe how you tested this change:
 - [ ] Root cause identified
 - [ ] Regression test added
 - [ ] Edge cases considered
+
+## Provider-specific checks
+
+Each repository appends its own checklist items below this heading; `tfkit scaffold fix` preserves everything below it verbatim and `tfkit scaffold check` ignores it.

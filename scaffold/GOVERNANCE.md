@@ -80,9 +80,11 @@ The project must be able to keep working if one person becomes unavailable. What
 * The repository, the registry namespace and the release identity belong to the
   `{{REGISTRY_NAMESPACE}}` organization rather than a personal account.
 * The release key pair and its passphrase live in the repository's encrypted Actions secrets
-  (`GPG_PRIVATE_KEY`, `PASSPHRASE`), used only by the release workflows, and the public half is
-  committed at `.github/release-signing-key.asc`, so any user can verify a release without asking
-  for a key; every release is reproducible from a tag by anyone with repository and secret access.
+  (`GPG_PRIVATE_KEY`, `PASSPHRASE`), used only by the release workflows. When the repository
+  publishes the key, the public half is committed at `.github/release-signing-key.asc`, so any user
+  can verify a release without asking for a key; a repository that does not publish it names the
+  trust root in its release notes instead. Every release is reproducible from a tag by anyone with
+  repository and secret access.
 * The whole release procedure is the reusable workflows in the kit, and the architecture behind it
   is written down in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 

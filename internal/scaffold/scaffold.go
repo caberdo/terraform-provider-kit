@@ -41,7 +41,31 @@ const (
 	templateSuffix = ".tmpl"
 	// eofMarker names the side of a line comparison that ran out of lines.
 	eofMarker = "(end of file)"
+	// pullRequestTemplate is the one enforced file with a section the
+	// repository owns: everything below providerSectionHeading is preserved
+	// verbatim by Fix and ignored by Check.
+	pullRequestTemplate = ".github/PULL_REQUEST_TEMPLATE.md"
+	// providerSectionHeading starts the provider-owned tail of the pull
+	// request template.
+	providerSectionHeading = "## Provider-specific checks"
 )
+
+// executable is the set of enforced files a rendered repository must be able
+// to run. The embedded file system reports every file as 0444, so the source
+// mode cannot be read back from it; this table is the source of truth and is
+// pinned to the checkout by TestCanonicalModesMatchTheScaffold.
+var executable = map[string]struct{}{
+	"scripts/changelog-release.sh": {},
+}
+
+// CanonicalMode returns the permission bits Fix writes for rel when the target
+// does not exist yet: 0o755 for an executable scaffold file, 0o644 otherwise.
+func CanonicalMode(rel string) fs.FileMode {
+	if _, ok := executable[rel]; ok {
+		return 0o755
+	}
+	return 0o644
+}
 
 // enforced is the exact set of files whose content must match the scaffold,
 // in report order. README prose, AGENTS.md and ARCHITECTURE.md content,
@@ -91,6 +115,7 @@ var knownPlaceholders = map[string]struct{}{
 	"REGISTRY_NAMESPACE": {},
 	"YEAR":               {},
 	"COPYRIGHT":          {},
+	"CONDUCT_CONTACT":    {},
 	"KIT_VERSION":        {},
 	"PACKAGES":           {},
 	"VERSIONS_FILE":      {},
@@ -420,10 +445,22 @@ func fix(root string, values map[string]string, opts Options, apply bool) ([]str
 			return written, fmt.Errorf("%w: %v", ErrFixIO, err)
 		}
 		if problem == nil {
-			continue
+			// Content equality is not enough for a script: a tree rendered
+			// without its mode looks repaired until someone runs it.
+			missing, err := executableModeMissing(root, rel)
+			if err != nil {
+				return written, fmt.Errorf("%w: %v", ErrFixIO, err)
+			}
+			if !missing {
+				continue
+			}
 		}
 		if apply {
-			if err := writeCanonical(root, rel, content[rel]); err != nil {
+			body, err := repairContent(root, rel, content[rel])
+			if err != nil {
+				return written, fmt.Errorf("%w: %v", ErrFixIO, err)
+			}
+			if err := writeCanonical(root, rel, body); err != nil {
 				return written, fmt.Errorf("%w: %v", ErrFixIO, err)
 			}
 		}
@@ -432,23 +469,106 @@ func fix(root string, values map[string]string, opts Options, apply bool) ([]str
 	return written, nil
 }
 
+// executableModeMissing reports whether an existing enforced file lacks the
+// executable bit its canonical content requires. A missing file is left to
+// compare, which reports it as Missing.
+func executableModeMissing(root, rel string) (bool, error) {
+	if _, ok := executable[rel]; !ok {
+		return false, nil
+	}
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	info, err := os.Lstat(full)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, nil
+	}
+	return info.Mode().Perm()&0o111 == 0, nil
+}
+
+// repairContent returns the bytes Fix writes for rel. The pull request
+// template is the only file with a provider-owned tail: everything below its
+// provider-section heading is kept verbatim so a repository's own checklist
+// items survive a repair.
+func repairContent(root, rel string, canonical []byte) ([]byte, error) {
+	if rel != pullRequestTemplate {
+		return canonical, nil
+	}
+
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	info, err := os.Lstat(full)
+	if errors.Is(err, fs.ErrNotExist) {
+		return canonical, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return canonical, nil
+	}
+	existing, err := os.ReadFile(full)
+	if err != nil {
+		return nil, err
+	}
+	_, tail, ok := splitProviderSection(existing)
+	if !ok || len(bytes.TrimSpace(tail)) == 0 {
+		return canonical, nil
+	}
+	head, _, ok := splitProviderSection(canonical)
+	if !ok {
+		return canonical, nil
+	}
+	merged := make([]byte, 0, len(head)+len(tail))
+	merged = append(merged, head...)
+	merged = append(merged, tail...)
+	return merged, nil
+}
+
+// splitProviderSection returns the part of content through the provider-section
+// heading line and the provider-owned part after it.
+func splitProviderSection(content []byte) (head, tail []byte, ok bool) {
+	offset := 0
+	for _, line := range bytes.SplitAfter(content, []byte("\n")) {
+		offset += len(line)
+		if strings.TrimRight(string(line), "\r\n") == providerSectionHeading {
+			return content[:offset], content[offset:], true
+		}
+	}
+	return content, nil, false
+}
+
 // writeCanonical replaces one enforced file. A path that exists but is not a
 // regular file is refused rather than followed or replaced: a symlink may point
 // outside the repository, and a directory is not a drifting file.
 func writeCanonical(root, rel string, content []byte) error {
 	full := filepath.Join(root, filepath.FromSlash(rel))
+	mode := CanonicalMode(rel)
 	info, err := os.Lstat(full)
 	switch {
 	case err == nil && !info.Mode().IsRegular():
 		return fmt.Errorf("refuse to overwrite %s: not a regular file", rel)
-	case err != nil && !errors.Is(err, fs.ErrNotExist):
+	case err == nil:
+		// Keep the target's permission bits so a narrower mode survives the
+		// repair, and add the canonical executable bits so a file that lost
+		// them regains them.
+		mode = info.Mode().Perm() | (CanonicalMode(rel) & 0o111)
+	case !errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("%s: %w", rel, err)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return fmt.Errorf("%s: %w", rel, err)
 	}
-	if err := os.WriteFile(full, content, 0o644); err != nil {
+	// WriteFile applies the umask to a new file and leaves an existing file's
+	// mode alone, so the mode is asserted explicitly afterwards.
+	if err := os.WriteFile(full, content, mode); err != nil {
+		return fmt.Errorf("%s: %w", rel, err)
+	}
+	if err := os.Chmod(full, mode); err != nil {
 		return fmt.Errorf("%s: %w", rel, err)
 	}
 	return nil
@@ -579,6 +699,19 @@ func compare(root, rel string, want []byte) (*Problem, error) {
 	}
 	if bytes.Equal(want, got) {
 		return nil, nil
+	}
+
+	// The provider-owned tail of the pull request template is not the kit's
+	// contract: a repository may append its own checklist items there.
+	if rel == pullRequestTemplate {
+		wantHead, _, ok := splitProviderSection(want)
+		if ok {
+			gotHead, _, _ := splitProviderSection(got)
+			if bytes.Equal(wantHead, gotHead) {
+				return nil, nil
+			}
+			want, got = wantHead, gotHead
+		}
 	}
 
 	line, wantLine, gotLine := firstDifference(want, got)

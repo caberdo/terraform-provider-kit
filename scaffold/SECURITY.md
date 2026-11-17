@@ -87,7 +87,7 @@ Trust boundaries and what crosses each one:
 |----------|---------------|----------|
 | Terraform CLI ↔ plugin process | Configuration values, credentials, resource state | Terraform plugin protocol 6.0; `Sensitive` marking; credentials carried only in the `Authorization` header |
 | Provider → {{PRODUCT}} API over the configured endpoint | Resources, data-source reads, request payloads | Scheme restricted to http/https; one bounded `http.Client`; typed JSON request bodies; a `User-Agent` identifying the provider and version |
-| Provider → release supply chain: Actions → GoReleaser → signed checksums + provenance → Terraform Registry | Release artifacts | The reusable release workflow imports the signing key from Actions secrets and pushes a signed tag, builds with GoReleaser, detach-signs the checksums, attests SLSA build provenance over the checksum file through OIDC, and attaches the SPDX-JSON SBOM and provenance bundle. The public key is committed at `.github/release-signing-key.asc`; the verification steps are in `README.md#verifying-a-release` |
+| Provider → release supply chain: Actions → GoReleaser → signed checksums + provenance → Terraform Registry | Release artifacts | The reusable release workflow imports the signing key from Actions secrets and pushes a signed tag, builds with GoReleaser, detach-signs the checksums, attests SLSA build provenance over the checksum file through OIDC, and attaches the SPDX-JSON SBOM and provenance bundle. Where the repository publishes the public key it is committed at `.github/release-signing-key.asc`; otherwise the release notes name the trust root. The verification steps are in `README.md#verifying-a-release` |
 
 ## Common weakness classes
 
@@ -109,8 +109,8 @@ Trust boundaries and what crosses each one:
   setting is missing, that document states it as an open item rather than implying it is enforced.
 - CI runs the golangci-lint set (`.golangci.yml`) and `gosec`, whose findings are uploaded to code
   scanning and fail the job.
-- `dependency-review` runs on pull requests.
-- The markdown link check runs on pull requests.
+- `dependency-review` runs only when the caller enables it (`dependency-review`).
+- The markdown link check runs only when the caller enables it (`markdown`, together with `docs`).
 - Release artifacts are built from a clean `CGO_ENABLED=0`, `-trimpath`, `-s -w` GoReleaser
   configuration with the commit timestamp as `mod_timestamp`; the tag and the checksums are signed,
   SLSA build provenance is attested, and the SBOM and provenance bundle are attached to the release.

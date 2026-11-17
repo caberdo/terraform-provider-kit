@@ -22,6 +22,9 @@ import (
 const (
 	defaultLicense           = "MIT"
 	defaultRegistryNamespace = "caberdo"
+	// defaultConductContact is the Code of Conduct enforcement contact the
+	// scaffold renders when the repository does not name its own.
+	defaultConductContact = "conduct@caberdo.nl"
 )
 
 // Validators for the values that must be named rather than derived. A wrong
@@ -34,6 +37,7 @@ var (
 	repoOwnerPattern      = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
 	repoNamePattern       = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 	licensePattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+-]*$`)
+	conductContactPattern = regexp.MustCompile(`^[^@\s]+@[^@\s]+$`)
 	modulePattern         = regexp.MustCompile(`(?m)^module[ \t]+(\S+)[ \t]*$`)
 	goPackageTokenPattern = regexp.MustCompile(`^(\.{1,2}/.*|\.)$`)
 )
@@ -174,6 +178,8 @@ func parseScaffoldFlags(command string, args []string, stderr io.Writer) (*scaff
 		"GitHub repository as owner/name (default: derived from `git remote get-url origin`)")
 	flags.StringVar(&parsed.input.License, "license", defaultLicense,
 		"SPDX licence identifier stated in the generated documents")
+	flags.StringVar(&parsed.input.ConductContact, "conduct-contact", defaultConductContact,
+		"Code of Conduct enforcement contact (default: "+defaultConductContact+")")
 	flags.Var(&parsed.allow, "allow",
 		"exempt a checked file, as <path>:<reason> (repeatable; the reason is required)")
 	if command == "fix" {
@@ -247,6 +253,7 @@ Flags:
   --repo           GitHub repository as owner/name
                    (default: derived from "git remote get-url origin"; must be github.com)
   --license        SPDX licence identifier (default "MIT"; rustfs uses "Apache-2.0")
+  --conduct-contact  Code of Conduct enforcement contact (default "conduct@caberdo.nl")
   --allow          exempt a checked file as <path>:<reason> (repeatable)
 %s`, command, dryRunFlag, action, scaffoldAllowFile, dryRunHelp)
 }
@@ -368,17 +375,18 @@ func printScaffoldProblems(w io.Writer, problems []scaffold.Problem) {
 
 // scaffoldInput is the raw flag set the scaffold subcommands parsed.
 type scaffoldInput struct {
-	Provider     string
-	Product      string
-	Module       string
-	Year         string
-	Copyright    string
-	KitVersion   string
-	Packages     string
-	VersionsFile string
-	Upstream     string
-	Repo         string
-	License      string
+	Provider       string
+	Product        string
+	Module         string
+	Year           string
+	Copyright      string
+	KitVersion     string
+	Packages       string
+	VersionsFile   string
+	Upstream       string
+	Repo           string
+	License        string
+	ConductContact string
 }
 
 // scaffoldValues validates the supplied values and derives the ones the
@@ -471,6 +479,15 @@ func scaffoldValues(root string, in scaffoldInput) (map[string]string, error) {
 		return nil, fmt.Errorf("--license %q must be an SPDX identifier such as MIT or Apache-2.0", license)
 	}
 
+	conductContact := strings.TrimSpace(in.ConductContact)
+	if conductContact == "" {
+		conductContact = defaultConductContact
+	}
+	if !conductContactPattern.MatchString(conductContact) {
+		return nil, fmt.Errorf("--conduct-contact %q must be an email address such as %s",
+			conductContact, defaultConductContact)
+	}
+
 	upper := strings.ToUpper(provider)
 	return map[string]string{
 		"PROVIDER":           provider,
@@ -480,6 +497,7 @@ func scaffoldValues(root string, in scaffoldInput) (map[string]string, error) {
 		"REGISTRY_NAMESPACE": defaultRegistryNamespace,
 		"YEAR":               year,
 		"COPYRIGHT":          copyright,
+		"CONDUCT_CONTACT":    conductContact,
 		"KIT_VERSION":        kitVersion,
 		"PACKAGES":           packages,
 		"VERSIONS_FILE":      versionsFile,
