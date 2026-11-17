@@ -43,6 +43,7 @@ func trinoValues() map[string]string {
 		"REGISTRY_NAMESPACE": "caberdo",
 		"YEAR":               "2026",
 		"COPYRIGHT":          "Dennis de Jong",
+		"CONDUCT_CONTACT":    "conduct@example.org",
 		"KIT_VERSION":        kitVersion,
 		"PACKAGES":           "./internal/...",
 		"VERSIONS_FILE":      ".github/trino-versions.txt",
@@ -63,6 +64,7 @@ func rustfsValues() map[string]string {
 		"REGISTRY_NAMESPACE": "caberdo",
 		"YEAR":               "2026",
 		"COPYRIGHT":          "Dennis de Jong",
+		"CONDUCT_CONTACT":    "conduct@example.org",
 		"KIT_VERSION":        kitVersion,
 		"PACKAGES":           "./...",
 		"VERSIONS_FILE":      ".github/rustfs-versions.txt",
@@ -139,7 +141,7 @@ func writeTree(t *testing.T, dir string, rendered map[string][]byte) {
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			t.Fatalf("mkdir for %s: %v", p, err)
 		}
-		if err := os.WriteFile(target, content, 0o644); err != nil {
+		if err := os.WriteFile(target, content, scaffold.CanonicalMode(p)); err != nil {
 			t.Fatalf("write %s: %v", p, err)
 		}
 	}
@@ -972,8 +974,219 @@ func TestFixReturnsWhatItWroteWhenAWriteIsRefused(t *testing.T) {
 	}
 }
 
-// TestCheckFailsClosedOnASymlinkedEnforcedPath proves comparison does not
-// follow a link out of the repository and accept it as canonical.
+// TestCanonicalModesMatchTheScaffold pins the executable table to the checkout.
+// The embedded tree reports every file as 0444, so a scaffold file that gains
+// the executable bit on disk must be declared in the table or Fix silently
+// loses it.
+func TestCanonicalModesMatchTheScaffold(t *testing.T) {
+	err := filepath.WalkDir(scaffoldDir, func(p string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(scaffoldDir, p)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		onDisk := info.Mode().Perm()&0o111 != 0
+		canonical := scaffold.CanonicalMode(relative)&0o111 != 0
+		if onDisk != canonical {
+			t.Errorf("%s: executable on disk = %t, CanonicalMode says %t", relative, onDisk, canonical)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk scaffold: %v", err)
+	}
+}
+
+// TestFixRestoresTheExecutableBit is the pilot's defect: a renderer writes
+// every file with the default mode, so a rendered repository's changelog
+// assembler arrives non-executable and Fix left it that way.
+func TestFixRestoresTheExecutableBit(t *testing.T) {
+	rendered, err := scaffold.Render(scaffoldDir, trinoValues())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	dir := t.TempDir()
+	writeTree(t, dir, rendered)
+
+	script := filepath.Join(dir, "scripts", "changelog-release.sh")
+	if err := os.Chmod(script, 0o644); err != nil {
+		t.Fatalf("chmod script: %v", err)
+	}
+
+	written, err := scaffold.Fix(dir, trinoValues(), scaffold.Options{})
+	if err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if !slices.Contains(written, "scripts/changelog-release.sh") {
+		t.Errorf("Fix wrote %q, want the script whose mode drifted", written)
+	}
+	info, err := os.Stat(script)
+	if err != nil {
+		t.Fatalf("stat script: %v", err)
+	}
+	if got, want := info.Mode().Perm(), fs.FileMode(0o755); got != want {
+		t.Errorf("scripts/changelog-release.sh mode = %o, want %o", got, want)
+	}
+
+	// The repaired mode is the canonical one, so a second fix is a no-op.
+	written, err = scaffold.Fix(dir, trinoValues(), scaffold.Options{})
+	if err != nil {
+		t.Fatalf("second Fix: %v", err)
+	}
+	if len(written) != 0 {
+		t.Errorf("second Fix wrote %q, want nothing", written)
+	}
+}
+
+// TestFixPreservesAnExistingTargetMode proves a repository's narrower mode is
+// not widened by a content repair.
+func TestFixPreservesAnExistingTargetMode(t *testing.T) {
+	dir := aligned(t, "trino", trinoValues())
+	path := filepath.Join(dir, ".editorconfig")
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("chmod .editorconfig: %v", err)
+	}
+	editFile(t, path, "\n# local editor preference\n")
+
+	if _, err := scaffold.Fix(dir, trinoValues(), scaffold.Options{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat .editorconfig: %v", err)
+	}
+	if got, want := info.Mode().Perm(), fs.FileMode(0o600); got != want {
+		t.Errorf(".editorconfig mode = %o, want the existing %o", got, want)
+	}
+}
+
+// TestCheckIgnoresTheProviderSection proves a repository may append its own
+// checklist items below the provider-section heading without drifting.
+func TestCheckIgnoresTheProviderSection(t *testing.T) {
+	dir := aligned(t, "trino", trinoValues())
+	path := filepath.Join(dir, ".github/PULL_REQUEST_TEMPLATE.md")
+	editFile(t, path, "\n- [ ] SQL identifiers go through trino.QuoteIdentifier\n")
+
+	report, err := scaffold.Check(dir, trinoValues(), scaffold.Options{})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !report.OK() {
+		t.Errorf("Problems = %v, want the provider section ignored", report.Problems)
+	}
+}
+
+// TestFixPreservesTheProviderSection proves a repair above the heading keeps
+// the repository's items, and a second fix leaves them alone.
+func TestFixPreservesTheProviderSection(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Provider\n"), 0o644); err != nil {
+		t.Fatalf("write README.md: %v", err)
+	}
+
+	if _, err := scaffold.Fix(dir, trinoValues(), scaffold.Options{}); err != nil {
+		t.Fatalf("first Fix: %v", err)
+	}
+	path := filepath.Join(dir, ".github/PULL_REQUEST_TEMPLATE.md")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	if !strings.Contains(string(content), "## Provider-specific checks") {
+		t.Fatalf("template has no provider-section heading:\n%s", content)
+	}
+	item := "- [ ] SQL identifiers go through trino.QuoteIdentifier"
+	if err := os.WriteFile(path, append(content, []byte("\n"+item+"\n")...), 0o644); err != nil {
+		t.Fatalf("append provider item: %v", err)
+	}
+
+	// Drift the kit-owned prefix; the provider's item sits below the heading.
+	content, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	drifted := strings.Replace(string(content), "- [ ] Root cause identified",
+		"- [ ] Root cause was identified", 1)
+	if drifted == string(content) {
+		t.Fatal("template has no 'Root cause identified' line to drift")
+	}
+	if err := os.WriteFile(path, []byte(drifted), 0o644); err != nil {
+		t.Fatalf("write drifted template: %v", err)
+	}
+
+	written, err := scaffold.Fix(dir, trinoValues(), scaffold.Options{})
+	if err != nil {
+		t.Fatalf("second Fix: %v", err)
+	}
+	if !slices.Contains(written, ".github/PULL_REQUEST_TEMPLATE.md") {
+		t.Errorf("Fix wrote %q, want the drifted template", written)
+	}
+	content, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read repaired template: %v", err)
+	}
+	if !strings.Contains(string(content), "- [ ] Root cause identified") {
+		t.Error("Fix did not restore the canonical line above the heading")
+	}
+	if strings.Contains(string(content), "Root cause was identified") {
+		t.Error("Fix kept the drifted line above the heading")
+	}
+	if !strings.Contains(string(content), item) {
+		t.Errorf("Fix dropped the provider item %q", item)
+	}
+	if report, err := scaffold.Check(dir, trinoValues(), scaffold.Options{}); err != nil || !report.OK() {
+		t.Errorf("Check after Fix = %v, %v; want a clean repository", report.Problems, err)
+	}
+}
+
+// TestRenderShipsTheScaffoldCheckTarget pins the target the canonical CI text
+// and the community documents send contributors to.
+func TestRenderShipsTheScaffoldCheckTarget(t *testing.T) {
+	rendered, err := scaffold.Render(scaffoldDir, trinoValues())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	makefile := string(rendered["GNUmakefile"])
+	for _, want := range []string{
+		"\nscaffold-check: $(TFKIT_DEP)\n",
+		"$(TFKIT) scaffold check",
+		"--product Trino",
+		"--upstream trinodb/trino",
+		"--repo caberdo/terraform-provider-trino",
+		"--license MIT",
+		"scaffold-check",
+	} {
+		if !strings.Contains(makefile, want) {
+			t.Errorf("GNUmakefile does not contain %q", want)
+		}
+	}
+	if got := strings.Count(makefile, "scaffold-check"); got < 3 {
+		t.Errorf("GNUmakefile names scaffold-check %d times, want the target, its comment and .PHONY", got)
+	}
+}
+
+// editFile appends text to path.
+func editFile(t *testing.T, path, addition string) {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, append(content, []byte(addition)...), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
 func TestCheckFailsClosedOnASymlinkedEnforcedPath(t *testing.T) {
 	dir := aligned(t, "trino", trinoValues())
 	outside := filepath.Join(t.TempDir(), "editorconfig")

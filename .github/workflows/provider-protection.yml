@@ -60,7 +60,7 @@ env:
   # exit 2 (configuration) and 3 (unreadable ruleset) into the drift status 1.
   # Install once and call the binary so the status reaches the branches below.
   # GOTOOLCHAIN=auto lets a caller with an older Go still build the kit.
-  TFKIT_VERSION: v0.15.0
+  TFKIT_VERSION: v0.16.0
   TFKIT: tfkit
   GOTOOLCHAIN: auto
 

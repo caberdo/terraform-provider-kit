@@ -5,6 +5,71 @@ import (
 	"testing"
 )
 
+func TestScaffoldValuesDefaultsTheConductContact(t *testing.T) {
+	values, err := scaffoldValues(".", scaffoldInput{
+		Provider:   "trino",
+		Product:    "Trino",
+		Module:     "github.com/caberdo/terraform-provider-trino",
+		Year:       "2026",
+		Copyright:  "Dennis de Jong",
+		KitVersion: "v0.16.0",
+		Packages:   "./...",
+		Upstream:   "trinodb/trino",
+		Repo:       "caberdo/terraform-provider-trino",
+		License:    "MIT",
+	})
+	if err != nil {
+		t.Fatalf("scaffoldValues: %v", err)
+	}
+	if got, want := values["CONDUCT_CONTACT"], defaultConductContact; got != want {
+		t.Errorf("CONDUCT_CONTACT = %q, want the documented default %q", got, want)
+	}
+}
+
+func TestScaffoldValuesPassesTheConductContactThrough(t *testing.T) {
+	values, err := scaffoldValues(".", scaffoldInput{
+		Provider:       "trino",
+		Product:        "Trino",
+		Module:         "github.com/caberdo/terraform-provider-trino",
+		Year:           "2026",
+		Copyright:      "Dennis de Jong",
+		KitVersion:     "v0.16.0",
+		Packages:       "./...",
+		Upstream:       "trinodb/trino",
+		Repo:           "caberdo/terraform-provider-trino",
+		License:        "MIT",
+		ConductContact: "conduct@trino.example",
+	})
+	if err != nil {
+		t.Fatalf("scaffoldValues: %v", err)
+	}
+	if got, want := values["CONDUCT_CONTACT"], "conduct@trino.example"; got != want {
+		t.Errorf("CONDUCT_CONTACT = %q, want %q", got, want)
+	}
+}
+
+func TestScaffoldValuesRejectsAnInvalidConductContact(t *testing.T) {
+	_, err := scaffoldValues(".", scaffoldInput{
+		Provider:       "trino",
+		Product:        "Trino",
+		Module:         "github.com/caberdo/terraform-provider-trino",
+		Year:           "2026",
+		Copyright:      "Dennis de Jong",
+		KitVersion:     "v0.16.0",
+		Packages:       "./...",
+		Upstream:       "trinodb/trino",
+		Repo:           "caberdo/terraform-provider-trino",
+		License:        "MIT",
+		ConductContact: "the maintainers",
+	})
+	if err == nil {
+		t.Fatal("scaffoldValues accepted a conduct contact that is not an email, want an error")
+	}
+	if !strings.Contains(err.Error(), "--conduct-contact") {
+		t.Errorf("error = %q, want it to name --conduct-contact", err)
+	}
+}
+
 func TestParseRemoteAcceptsGitSpellings(t *testing.T) {
 	cases := map[string]string{
 		"https://github.com/caberdo/terraform-provider-trino.git": "caberdo/terraform-provider-trino",
