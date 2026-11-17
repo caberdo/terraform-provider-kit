@@ -34,6 +34,11 @@ on:
         required: false
         type: boolean
         default: false
+      strip-suffix:
+        description: "Literal suffix removed from the end of a tag after strip-v (openmetadata: -release)"
+        required: false
+        type: string
+        default: ""
       window:
         description: "Number of newest stable releases the matrix must cover"
         required: false
@@ -143,9 +148,13 @@ jobs:
             | jq -r \
                 --argjson window ${{ inputs.window }} \
                 --argjson strip ${{ inputs.strip-v && 1 || 0 }} \
+                --arg suffix "${{ inputs.strip-suffix }}" \
                 'add | map(select(.draft == false and .prerelease == false)) | .[0:$window] | .[]
-                 | [(if $strip == 1 then (.tag_name | sub("^v"; "")) else .tag_name end),
-                    (.published_at[0:10])] | @tsv')
+                 | (if $strip == 1 then (.tag_name | sub("^v"; "")) else .tag_name end) as $tag
+                 | (if $suffix != "" and ($tag | endswith($suffix))
+                    then $tag[0:(($tag | length) - ($suffix | length))]
+                    else $tag end) as $normalised
+                 | [$normalised, (.published_at[0:10])] | @tsv')
           if [[ -z "$window" ]]; then
             echo "the GitHub releases API returned no stable ${{ inputs.provider-display }} releases" >&2
             exit 1

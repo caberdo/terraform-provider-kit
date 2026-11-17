@@ -22,6 +22,7 @@ func freshnessInputs(file string) map[string]string {
 		"inputs.versions-file":     file,
 		"inputs.window":            "5",
 		"inputs.strip-v && 1 || 0": "1",
+		"inputs.strip-suffix":      "",
 		"inputs.provider-display":  "Trino",
 		"inputs.upstream":          "trinodb/trino",
 		"inputs.issue-label":       "version-matrix",
@@ -31,11 +32,24 @@ func freshnessInputs(file string) map[string]string {
 func runFreshness(t *testing.T, file string, stub ghStub) stepRun {
 	t.Helper()
 
+	return runFreshnessWith(t, file, stub, nil)
+}
+
+// runFreshnessWith is runFreshness with input overrides, for the callers whose
+// tags carry something other than a `v` prefix.
+func runFreshnessWith(t *testing.T, file string, stub ghStub, overrides map[string]string) stepRun {
+	t.Helper()
+
+	inputs := freshnessInputs(file)
+	for key, value := range overrides {
+		inputs[key] = value
+	}
+
 	return runStep(
 		t,
 		"provider-freshness.yml",
 		"Compare the matrix with the last stable releases",
-		freshnessInputs(file),
+		inputs,
 		map[string]string{"REPO": "caberdo/terraform-provider-trino", "GH_TOKEN": "token"},
 		stub,
 	)
@@ -113,6 +127,63 @@ func TestProviderFreshnessNeverOffersAReleaseBelowTheNewestPin(t *testing.T) {
 	}
 	if got := run.outputs["newest-missing"]; got != "" {
 		t.Errorf("newest-missing = %q, want empty; the canary would test a release below the floor", got)
+	}
+}
+
+// openmetadataReleases is one page of the releases API with OpenMetadata's tag
+// shape: a stable release ends in `-release` while the versions file holds the
+// bare version, so neither the comparison nor the canary can match without the
+// suffix being removed. The rc is a prerelease and must be ignored.
+const openmetadataReleases = `[[
+  {"tag_name": "2.1.0-rc2-release", "draft": false, "prerelease": true, "published_at": "2026-11-12T00:00:00Z"},
+  {"tag_name": "2.0.8-release", "draft": false, "prerelease": false, "published_at": "2026-11-01T00:00:00Z"},
+  {"tag_name": "2.0.7-release", "draft": false, "prerelease": false, "published_at": "2026-10-01T00:00:00Z"}
+]]`
+
+// openmetadataInputs is the caller's normalisation: no `v` prefix, a literal
+// `-release` suffix.
+func openmetadataInputs() map[string]string {
+	return map[string]string{
+		"inputs.provider-display":  "OpenMetadata",
+		"inputs.upstream":          "open-metadata/OpenMetadata",
+		"inputs.strip-v && 1 || 0": "0",
+		"inputs.strip-suffix":      "-release",
+	}
+}
+
+// TestProviderFreshnessStripsTheReleaseSuffix pins the openmetadata case on both
+// halves of the report: the matrix that covers the normalised window is not
+// stale, and a stale matrix names the release without the suffix, because a
+// canary cannot pull an image tagged `2.0.8-release`.
+func TestProviderFreshnessStripsTheReleaseSuffix(t *testing.T) {
+	stale := runFreshnessWith(t, versionsFile(t, "1.13.6"), ghStub{releases: openmetadataReleases}, openmetadataInputs())
+	if got := stale.outputs["behind"]; got != "true" {
+		t.Errorf("behind = %q, want %q (log %s)", got, "true", stale.log)
+	}
+	if got := stale.outputs["newest-missing"]; got != "2.0.8" {
+		t.Errorf("newest-missing = %q, want %q; the suffix was not stripped (log %s)", got, "2.0.8", stale.log)
+	}
+
+	covered := runFreshnessWith(t, versionsFile(t, "1.13.6", "2.0.7", "2.0.8"), ghStub{releases: openmetadataReleases}, openmetadataInputs())
+	if got := covered.outputs["behind"]; got != "false" {
+		t.Errorf("behind = %q, want %q; the normalised window was not recognised (log %s)", got, "false", covered.log)
+	}
+	if got := covered.outputs["newest-missing"]; got != "" {
+		t.Errorf("newest-missing = %q, want empty (log %s)", got, covered.log)
+	}
+}
+
+// TestProviderFreshnessIgnoresALiteralReleaseSuffix pins `strip-suffix` as a
+// literal end-of-tag match rather than a regex or a mid-string substitution.
+func TestProviderFreshnessIgnoresALiteralReleaseSuffix(t *testing.T) {
+	releases := `[[
+  {"tag_name": "2.0.9-release-notes", "draft": false, "prerelease": false, "published_at": "2026-11-05T00:00:00Z"},
+  {"tag_name": "2.0.8-release", "draft": false, "prerelease": false, "published_at": "2026-11-01T00:00:00Z"}
+]]`
+	run := runFreshnessWith(t, versionsFile(t, "1.13.6"), ghStub{releases: releases}, openmetadataInputs())
+
+	if got := run.outputs["newest-missing"]; got != "2.0.9-release-notes" {
+		t.Errorf("newest-missing = %q, want %q; a suffix inside the tag must be left alone (log %s)", got, "2.0.9-release-notes", run.log)
 	}
 }
 
