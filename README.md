@@ -118,3 +118,17 @@ release pull request, so a stale pin is caught before the tag is published.
 ## Licence
 
 MIT — see [LICENSE](LICENSE).
+
+## Releasing the kit
+
+The workflows must name a tag that only exists after the release, so the release being prepared lives
+in `KIT_VERSION`. To cut a release:
+
+1. Bump `KIT_VERSION` and `TFKIT_VERSION` in the three reusable workflows to the same tag `vX.Y.Z`.
+   `TestProviderCIPinsItsOwnRelease` fails when they disagree.
+2. Run `go test ./...` and `actionlint .github/workflows/*.yml`.
+3. Commit, tag `vX.Y.Z`, push the commit and the tag.
+4. Bump the five providers' `uses:` pins and their `GNUmakefile` `TFKIT ?=` to the new tag.
+
+`scripts/check-tfkit-commands.sh` installs the pinned tag and exercises it, so a command added to the
+CLI without a release that contains it fails self-ci rather than a provider's pipeline.

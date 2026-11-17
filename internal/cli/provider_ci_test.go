@@ -91,10 +91,20 @@ func TestProviderCIScaffoldJobIsSkippedByDefault(t *testing.T) {
 // workflow ships inside its own tag, so the pin must name that tag: when tagging
 // vX, TFKIT_VERSION is vX. v0.12.0 shipped the inverted release check while
 // claiming the new default, which is why an older pin is not acceptable.
+//
+// The expected value comes from KIT_VERSION rather than a literal here: the kit
+// is the one repository that must name a tag before it exists, so the release
+// being prepared lives in that file and this test only enforces that the two
+// agree. Bump both together, then tag.
 func TestProviderCIPinsItsOwnRelease(t *testing.T) {
 	workflow := readProviderCI(t)
-	if got, want := workflow.Env["TFKIT_VERSION"], "v0.13.0"; got != want {
-		t.Errorf("TFKIT_VERSION = %q, want %q (the release this workflow ships in)", got, want)
+	raw, err := os.ReadFile(filepath.Join("..", "..", "KIT_VERSION"))
+	if err != nil {
+		t.Fatalf("read KIT_VERSION: %v", err)
+	}
+	want := strings.TrimSpace(string(raw))
+	if got := workflow.Env["TFKIT_VERSION"]; got != want {
+		t.Errorf("TFKIT_VERSION = %q, want %q from KIT_VERSION", got, want)
 	}
 }
 
