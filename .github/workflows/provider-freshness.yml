@@ -1,14 +1,15 @@
 # Reusable version-matrix freshness check for the caberdo Terraform providers.
 #
-# Two jobs, each reporting at most one labelled issue that clears itself when
+# Three jobs, each reporting at most one labelled issue that clears itself when
 # the finding goes away:
 #
 #   upstream       compare the versions file with the upstream releases
 #   canary         run the acceptance suite against the newest release the
 #                  matrix does not cover (opt-in, advisory, never required)
+#   kit            compare this repository's kit pin with the newest kit release
 #
-# It never edits the versions file or a tag: a human or an agent lands the
-# change. The caller owns the triggers (`schedule` and
+# It never edits the versions file, the pins, or a tag: a human or an agent
+# lands the change. The caller owns the triggers (`schedule` and
 # `workflow_dispatch`) and must grant `issues: write`; the canary additionally
 # needs `actions: read` to read the failing job's log.
 name: Provider Version Freshness
@@ -73,6 +74,22 @@ on:
         required: false
         type: boolean
         default: false
+      kit-check:
+        description: "Check this repository's kit pin against the newest kit release"
+        required: false
+        type: boolean
+        default: true
+      kit-repo:
+        description: "Kit repository as owner/name"
+        required: false
+        type: string
+        default: "caberdo/terraform-provider-kit"
+      kit-pin-glob:
+        description: "Glob of workflow files that pin the kit"
+        required: false
+        type: string
+        default: ".github/workflows/*.yml"
+
 permissions:
   contents: read
 
@@ -399,3 +416,161 @@ jobs:
               --label canary-failure \
               --body-file "$body"
           fi
+
+  # Compares every pin of the kit in this repository with the kit's newest
+  # release. A pin that is behind, a repository that mixes tags, and a pin that
+  # names no tag are all failures; the cadence (monthly) belongs to the caller's
+  # schedule, not to this job.
+  kit:
+    name: Check the ${{ inputs.provider-display }} kit pin
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: inputs.kit-check
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Compare the kit pins with the newest kit release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          KIT_REPO: ${{ inputs.kit-repo }}
+          PIN_GLOB: ${{ inputs.kit-pin-glob }}
+          DISPLAY: ${{ inputs.provider-display }}
+        run: |
+          set -euo pipefail
+
+          latest=$(gh api "repos/$KIT_REPO/releases/latest" | jq -r '.tag_name // empty')
+          if [[ -z "$latest" ]]; then
+            echo "the $KIT_REPO releases API returned no latest tag" >&2
+            exit 1
+          fi
+          # One request instead of one per pin, and unambiguous: a *tag* named
+          # like a branch is still a tag only if it is in this list.
+          known_tags=$(gh api "repos/$KIT_REPO/tags?per_page=100" --paginate --slurp | jq -r '.[][] | .name')
+
+          # Every `uses:` of a kit workflow, and the GNUmakefile's TFKIT ?=.
+          # The owner/repo is escaped so a different kit-repo input still works.
+          pins=()
+          sources=()
+          pattern="${KIT_REPO//./\\.}/\\.github/workflows/[A-Za-z0-9._-]+@[A-Za-z0-9._/-]+"
+          while IFS= read -r file; do
+            if [[ -z "$file" ]]; then
+              continue
+            fi
+            while IFS= read -r pin; do
+              if [[ -z "$pin" ]]; then
+                continue
+              fi
+              pins+=("$pin")
+              sources+=("$file")
+            done < <(grep -oE -- "$pattern" "$file" | sed 's/.*@//' || true)
+          done < <(compgen -G "$PIN_GLOB" || true)
+
+          if [[ -f GNUmakefile ]]; then
+            while IFS= read -r pin; do
+              if [[ -z "$pin" ]]; then
+                continue
+              fi
+              pins+=("$pin")
+              sources+=("GNUmakefile")
+            done < <(sed -n 's/^[[:space:]]*TFKIT[[:space:]]*?=[[:space:]].*tfkit@\([^[:space:]]*\).*/\1/p' GNUmakefile)
+          fi
+
+          if [[ ${#pins[@]} -eq 0 ]]; then
+            echo "no $KIT_REPO pin found under '$PIN_GLOB' or in GNUmakefile's TFKIT ?=; the check cannot report" >&2
+            exit 1
+          fi
+
+          problems=()
+          distinct=$(printf '%s\n' "${pins[@]}" | sort -u | wc -l | tr -d ' ')
+          if [[ "$distinct" -gt 1 ]]; then
+            problems+=("- the repository pins $distinct different kit tags; every pin must equal \`$latest\`.")
+          fi
+
+          pin_rows=""
+          while IFS= read -r pin; do
+            if [[ -z "$pin" ]]; then
+              continue
+            fi
+            where=""
+            for i in "${!pins[@]}"; do
+              if [[ "${pins[$i]}" == "$pin" ]]; then
+                if [[ -n "$where" ]]; then
+                  where="$where, "
+                fi
+                where="$where\`${sources[$i]}\`"
+              fi
+            done
+            pin_rows="$pin_rows- \`$pin\` in $where"$'\n'
+            if [[ "$pin" == "$latest" ]]; then
+              continue
+            fi
+            if ! grep -qxF -- "$pin" <<< "$known_tags"; then
+              problems+=("- \`$pin\` in $where is not a tag in \`$KIT_REPO\`.")
+            elif [[ "$(printf '%s\n%s\n' "$pin" "$latest" | sort -V | tail -n 1)" == "$latest" ]]; then
+              problems+=("- \`$pin\` in $where is behind \`$latest\`.")
+            else
+              problems+=("- \`$pin\` in $where is ahead of \`$latest\`; the newest release is \`$latest\`.")
+            fi
+          done <<< "$(printf '%s\n' "${pins[@]}" | sort -u)"
+
+          if [[ ${#problems[@]} -eq 0 ]]; then
+            echo "Every kit pin is $latest."
+            existing=$(gh issue list \
+              --repo "$REPO" \
+              --label kit-update \
+              --state open \
+              --json number \
+              --jq '.[0].number // empty')
+            if [[ -n "$existing" ]]; then
+              gh issue comment "$existing" --repo "$REPO" \
+                --body "Every kit pin is \`$latest\` again; closing this issue."
+              gh issue close "$existing" --repo "$REPO"
+              echo "Closed issue #$existing."
+            fi
+            exit 0
+          fi
+
+          echo "The kit pins are out of date:"
+          printf '%s\n' "${problems[@]}"
+
+          body=$(mktemp)
+          {
+            echo "<!-- kit pin report -->"
+            echo "The newest release of \`$KIT_REPO\` is \`$latest\`, and this repository pins:"
+            echo
+            printf '%s' "$pin_rows"
+            echo
+            echo "**Problems**"
+            printf '%s\n' "${problems[@]}"
+            echo
+            echo "Bump every pin to \`$latest\` in one commit; this workflow never edits them."
+          } > "$body"
+
+          gh label create kit-update \
+            --description "Repository is behind on the kit" \
+            --color fbca04 2>/dev/null || true
+
+          existing=$(gh issue list \
+            --repo "$REPO" \
+            --label kit-update \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+          title="$DISPLAY kit pin is out of date"
+          if [[ -n "$existing" ]]; then
+            gh issue edit "$existing" --repo "$REPO" --title "$title" --body-file "$body"
+            echo "Updated issue #$existing."
+          else
+            gh issue create \
+              --repo "$REPO" \
+              --title "$title" \
+              --label kit-update \
+              --body-file "$body"
+          fi
+
+          exit 1
