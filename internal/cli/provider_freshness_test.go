@@ -130,6 +130,64 @@ func TestProviderFreshnessNeverOffersAReleaseBelowTheNewestPin(t *testing.T) {
 	}
 }
 
+// agentgatewayReleases is one page of the releases API with agentgateway's tag
+// shape: bare `vX.Y.Z` tags, exactly as the matrix holds them. The provider's
+// floor is v1.7.0, the first release with the full config resource API, so
+// v1.4.0-v1.6.0 are stable upstream releases *below* the floor.
+const agentgatewayReleases = `[[
+  {"tag_name": "v1.7.0", "draft": false, "prerelease": false, "published_at": "2026-10-27T00:00:00Z"},
+  {"tag_name": "v1.6.0", "draft": false, "prerelease": false, "published_at": "2026-10-02T00:00:00Z"},
+  {"tag_name": "v1.5.0", "draft": false, "prerelease": false, "published_at": "2026-08-27T00:00:00Z"},
+  {"tag_name": "v1.4.1", "draft": false, "prerelease": false, "published_at": "2026-07-29T00:00:00Z"},
+  {"tag_name": "v1.4.0", "draft": false, "prerelease": false, "published_at": "2026-07-27T00:00:00Z"}
+]]`
+
+// agentgatewayInputs is the caller's normalisation: no `v` prefix is stripped
+// because the matrix holds the same `v`-prefixed tag as upstream.
+func agentgatewayInputs() map[string]string {
+	return map[string]string{
+		"inputs.provider-display":  "agentgateway",
+		"inputs.upstream":          "agentgateway/agentgateway",
+		"inputs.strip-v && 1 || 0": "0",
+		"inputs.strip-suffix":      "",
+	}
+}
+
+// TestProviderFreshnessIgnoresReleasesBelowTheFloor pins issue #9: the floor is
+// the oldest release the provider supports, so older stable releases are not
+// part of the window the matrix must cover. A file that is exactly the floor is
+// complete even while the last five upstream releases include older ones — the
+// suite cannot pass on those, so demanding them would keep the issue open
+// forever.
+func TestProviderFreshnessIgnoresReleasesBelowTheFloor(t *testing.T) {
+	run := runFreshnessWith(t, versionsFile(t, "v1.7.0"), ghStub{releases: agentgatewayReleases}, agentgatewayInputs())
+
+	if got := run.outputs["behind"]; got != "false" {
+		t.Errorf("behind = %q, want %q (log %s)", got, "false", run.log)
+	}
+	if got := run.outputs["newest-missing"]; got != "" {
+		t.Errorf("newest-missing = %q, want empty (log %s)", got, run.log)
+	}
+	if hasCall(run.calls, "issue create") || hasCall(run.calls, "issue edit") {
+		t.Errorf("a matrix at its floor opened an issue; gh calls = %q", run.calls)
+	}
+}
+
+// TestProviderFreshnessKeepsSupportedReleasesAboveTheFloor is the other half:
+// dropping the below-floor entries must not hide a release the provider does
+// support, so a floor of v1.6.0 still requires v1.7.0 and offers it to the
+// canary.
+func TestProviderFreshnessKeepsSupportedReleasesAboveTheFloor(t *testing.T) {
+	run := runFreshnessWith(t, versionsFile(t, "v1.6.0"), ghStub{releases: agentgatewayReleases}, agentgatewayInputs())
+
+	if got := run.outputs["behind"]; got != "true" {
+		t.Errorf("behind = %q, want %q (log %s)", got, "true", run.log)
+	}
+	if got := run.outputs["newest-missing"]; got != "v1.7.0" {
+		t.Errorf("newest-missing = %q, want %q (log %s)", got, "v1.7.0", run.log)
+	}
+}
+
 // openmetadataReleases is one page of the releases API with OpenMetadata's tag
 // shape: a stable release ends in `-release` while the versions file holds the
 // bare version, so neither the comparison nor the canary can match without the

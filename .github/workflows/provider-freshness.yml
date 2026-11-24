@@ -46,7 +46,7 @@ on:
         type: string
         default: ""
       window:
-        description: "Number of newest stable releases the matrix must cover"
+        description: "Number of newest stable releases at or above the floor the matrix must cover"
         required: false
         type: number
         default: 5
@@ -155,7 +155,7 @@ jobs:
           # `window`. --slurp is required: without it, --paginate emits one JSON
           # array per page and jq would take the window from *each* page.
           releases=$(gh api "repos/${{ inputs.upstream }}/releases?per_page=100" --paginate --slurp)
-          window=$(printf '%s' "$releases" \
+          window_all=$(printf '%s' "$releases" \
             | jq -r \
                 --argjson window ${{ inputs.window }} \
                 --argjson strip ${{ inputs.strip-v && 1 || 0 }} \
@@ -166,9 +166,34 @@ jobs:
                     then $tag[0:(($tag | length) - ($suffix | length))]
                     else $tag end) as $normalised
                  | [$normalised, (.published_at[0:10])] | @tsv')
-          if [[ -z "$window" ]]; then
+          if [[ -z "$window_all" ]]; then
             echo "the GitHub releases API returned no stable ${{ inputs.provider-display }} releases" >&2
             exit 1
+          fi
+
+          window_max_all=$(printf '%s\n' "$window_all" | cut -f1 | sort -V | tail -n 1)
+
+          # The matrix covers the floor and the stable releases above it, never
+          # the ones below it: the floor is the oldest version the provider
+          # supports, so asking for an older release asks for a suite run that
+          # cannot pass (agentgateway's floor is the first release with the
+          # full config resource API). Filtering the window keeps a young
+          # project's matrix satisfiable while upstream has fewer than `window`
+          # stable releases above that floor.
+          #
+          # A floor *newer* than every stable release is a different finding:
+          # nothing is at or above it, so filtering would hide a floor upstream
+          # never published. Keep the full window there and report the matrix
+          # stale rather than silently accepting it.
+          if [[ "$(printf '%s\n%s\n' "$window_max_all" "$floor" | sort -V | tail -n 1)" == "$floor" ]] \
+            && [[ "$floor" != "$window_max_all" ]]; then
+            window="$window_all"
+          else
+            window=$(printf '%s\n' "$window_all" | while IFS=$'\t' read -r tag released; do
+              if [[ "$(printf '%s\n%s\n' "$floor" "$tag" | sort -V | tail -n 1)" == "$tag" ]]; then
+                printf '%s\t%s\n' "$tag" "$released"
+              fi
+            done)
           fi
 
           window_versions=$(printf '%s\n' "$window" | cut -f1)
@@ -228,7 +253,7 @@ jobs:
             printf '%s\n' "$current"
             echo '```'
             echo
-            echo "**Expected** (floor \`$floor\` plus the last stable releases, ascending)"
+            echo "**Expected** (floor \`$floor\` plus the stable releases at or above it, ascending)"
             echo '```'
             printf '%s\n' "$expected"
             echo '```'
@@ -278,7 +303,7 @@ jobs:
     if: inputs.canary && needs.upstream.outputs.behind == 'true' && needs.upstream.outputs.newest-missing != ''
     permissions:
       contents: read
-    uses: caberdo/terraform-provider-kit/.github/workflows/provider-acceptance.yml@v0.16.0
+    uses: caberdo/terraform-provider-kit/.github/workflows/provider-acceptance.yml@v0.17.0
     with:
       provider: ${{ github.event.repository.name }}
       provider-display: ${{ inputs.provider-display }}

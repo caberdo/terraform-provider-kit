@@ -119,7 +119,7 @@ permissions:
 env:
   # `go run` rewrites a child's non-zero status to 1, so tfkit's exit codes
   # would be lost. The job installs the tool once and calls the binary.
-  TFKIT_VERSION: v0.16.0
+  TFKIT_VERSION: v0.17.0
   TFKIT: tfkit
   GOTOOLCHAIN: auto
 
