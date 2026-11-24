@@ -303,7 +303,7 @@ jobs:
     if: inputs.canary && needs.upstream.outputs.behind == 'true' && needs.upstream.outputs.newest-missing != ''
     permissions:
       contents: read
-    uses: caberdo/terraform-provider-kit/.github/workflows/provider-acceptance.yml@v0.16.0
+    uses: caberdo/terraform-provider-kit/.github/workflows/provider-acceptance.yml@v0.17.0
     with:
       provider: ${{ github.event.repository.name }}
       provider-display: ${{ inputs.provider-display }}
